@@ -41,6 +41,17 @@ validation_report.json
 Gemini_Generated_Image_*.png
 
 # ----------------------------
+# LaTeX build artifacts
+# ----------------------------
+*.aux
+*.out
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.synctex.gz
+
+# ----------------------------
 # Python local runtime
 # ----------------------------
 **/.venv/
