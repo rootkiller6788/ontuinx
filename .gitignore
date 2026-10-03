@@ -66,6 +66,12 @@ Gemini_Generated_Image_*.png
 # ----------------------------
 **/.gitmemory/
 **/.autocog/
+.ontoloop-sessions/
+
+# ----------------------------
+# Scratch notes
+# ----------------------------
+/ceshi.txt
 
 # ----------------------------
 # Local secrets / env
