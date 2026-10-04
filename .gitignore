@@ -1,0 +1,71 @@
+# Rust build artifacts
+/target/
+**/target/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Node (ironclaw frontend etc.)
+node_modules/
+
+# Docker
+*.log
+
+# Generated / build output
+dist/
+build/
+.parcel-cache/
+*.timestamp
+
+# Test artifacts
+test-results/
+*.snapshot
+
+# macOS
+**/.DS_Store
+
+# C build artifacts (ofg-core)
+*.o
+*.a
+*.so
+*.dylib
+
+# CMake build dirs (any project)
+build_asan/
+build_debug/
+build_release/
+CMakeCache.txt
+CMakeFiles/
+CTestTestfile.cmake
+cmake_install.cmake
+Makefile
+
+# Auto-generated tree-sitter parsers (huge, regenerate from grammar repos)
+crates/onto-graph-core/ofg-core/internal/cbm/vendored/grammars/
+
+# Rust (belt-and-suspenders — workspace level already covers)
+# **/target/ above catches all crate target dirs
+
+# Benchmark results (generated at runtime)
+benchmark/*/results/
+
+# Temporary
+/tmp/
+/temp/

@@ -1,0 +1,77 @@
+---
+paths:
+  - "crates/ironclaw_skills/**"
+  - "crates/ironclaw_reborn_composition/src/extension_host/bundled_skills.rs"
+  - "skills/**"
+---
+# Skills System
+
+SKILL.md files extend the agent's prompt with domain-specific instructions. Each skill is a YAML frontmatter block (metadata, activation criteria, required tools) followed by a markdown body injected into the LLM context.
+
+## Trust Model
+
+| Trust Level | Source | Tool Access |
+|-------------|--------|-------------|
+| **Trusted** | User-placed in `~/.ironclaw/skills/` or workspace `skills/` | All tools available to the agent |
+| **Installed** | Downloaded from ClawHub registry or HTTPS skill URL (`~/.ironclaw/installed_skills/`, or URL provenance metadata in Reborn scoped skill storage) | Read-only tools only (no shell, file write, HTTP) |
+
+## SKILL.md Format
+
+```yaml
+---
+name: my-skill
+version: 0.1.0
+description: Does something useful
+activation:
+  patterns:
+    - "deploy to.*production"
+  keywords:
+    - "deployment"
+  exclude_keywords:
+    - "rollback"
+  tags:
+    - "devops"
+  max_context_tokens: 2000
+requires:
+  bins: [docker, kubectl]
+  env: [KUBECONFIG]
+---
+
+# Skill instructions here...
+```
+
+Only the top-level `requires:` block is supported. The historical nested shape
+`metadata.openclaw.requires` is unsupported and ignored by the current parser,
+so older external skills must be migrated instead of relying on silent
+compatibility.
+
+The parser supports more than the example above shows (source of truth:
+`crates/ironclaw_skills/src/types.rs` and `selector.rs`):
+
+- `requires.bins`, `requires.env`, and **`requires.config`** are gating inputs.
+- **`requires.skills`** declares companion skills that should chain-load when
+  available; missing companions do not prevent the parent skill from loading.
+- `activation.setup_marker` gates a skill on a workspace setup-marker file
+  (used by the `*-setup` skill family).
+- **Silent truncation caps**: `enforce_limits` keeps at most
+  `MAX_KEYWORDS_PER_SKILL = 20` keywords and `MAX_PATTERNS_PER_SKILL = 5`
+  patterns per skill — anything beyond is dropped without error. Keep lists
+  within those caps or your extra triggers simply don't exist.
+
+When parser behavior changes, update this file in the same PR
+(`ironclaw-reborn-skill-maintainer` rule 7).
+
+## Selection Pipeline
+
+1. **Gating** -- Check binary/env/config requirements; skip skills whose prerequisites are missing
+2. **Scoring** -- Deterministic scoring: keywords (10/5 pts, cap 30) + patterns (20 pts, cap 40) + tags (3 pts, cap 15). `exclude_keywords` veto (score = 0 if any present). Pattern (regex) scoring is gated on `SKILLS_REGEX_ACTIVATION_ENABLED` (default `true`); when `false`, regex activation contributes 0 and only keywords/tags/explicit mentions can select a skill.
+3. **Budget** -- Select top-scoring skills within `SKILLS_MAX_TOKENS` prompt budget
+4. **Attenuation** -- Minimum trust across active skills determines tool ceiling; installed skills lose dangerous tools
+
+## Skill Tools
+
+- `skill_list` -- List all discovered skills with trust level and status
+- `skill_search` -- Search ClawHub registry for available skills
+- `skill_install` -- Install a skill from raw SKILL.md content or ClawHub
+- `skill_install_url` -- Fetch and install a skill from an HTTPS raw SKILL.md, ZIP bundle, or supported GitHub repository/tree URL
+- `skill_remove` -- Remove an installed skill

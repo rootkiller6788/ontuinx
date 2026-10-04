@@ -1,0 +1,10 @@
+{
+  "scenario": "evidence_tampered",
+  "chain_valid": false,
+  "record_count": 1,
+  "evidence_hash": "b155bad0c937ac4d9429c79de022461ca2e45545248ac150eec02801a7a0c8f1",
+  "overall_passed": true,
+  "task_outcome": "success",
+  "settlement": "commit",
+  "replay_hash": "d3b4af36a31e3abbef82a6895cfc6edbebb714b81eb055bf77b86ac92e64c839"
+}

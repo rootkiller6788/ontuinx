@@ -1,0 +1,29 @@
+Implement a generic dynamic array (darray) library in C11.
+
+## API (darray.h)
+
+darray *darray_create(size_t elem_size, size_t capacity);
+void   darray_destroy(darray *da);
+size_t darray_size(const darray *da);
+size_t darray_capacity(const darray *da);
+
+int darray_push(darray *da, const void *elem);
+int darray_pop(darray *da, void *out);
+int darray_insert(darray *da, size_t index, const void *elem);
+int darray_remove(darray *da, size_t index, void *out);
+int darray_reserve(darray *da, size_t new_cap);
+int darray_shrink(darray *da);
+int darray_get(const darray *da, size_t index, void *out);
+int darray_set(darray *da, size_t index, const void *elem);
+
+darray_create returns NULL on failure. Mutating functions return 0 on success.
+
+Error codes: DARRAY_ENOMEM(-1) DARRAY_EOVERFLOW(-2) DARRAY_EINDEX(-3) DARRAY_ENULL(-4)
+
+Custom allocator: darray_set_allocator(da, malloc_fn, free_fn, realloc_fn). Default stdlib.
+
+Overflow: 2x growth. Check for overflow before multiply. Return DARRAY_EOVERFLOW, leave unchanged.
+
+Build: CMakeLists.txt (static lib darray + test exe, C11 -Wall -Wextra -pedantic, Debug with ASan+UBSan, CTest). Write test_darray.c covering all operations, errors, edge cases, custom allocator, overflow. Write README.md.
+
+Output: darray.h darray.c test_darray.c CMakeLists.txt README.md

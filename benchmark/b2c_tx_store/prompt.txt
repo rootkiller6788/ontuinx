@@ -1,0 +1,4 @@
+Fix the defects in src/store.c. The library implements a transactional key-value
+store with begin/commit/rollback, journal-based recovery, iteration, and checksum.
+Several invariants are violated — the test suite reveals which ones fail.
+All tests must pass without memory errors.

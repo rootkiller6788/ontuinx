@@ -1,0 +1,10 @@
+{
+  "scenario": "incomplete",
+  "chain_valid": true,
+  "record_count": 3,
+  "evidence_hash": "73de07e44a154bf1f89990e8d032d346c47d8af759e461e584a3f0c86733172b",
+  "overall_passed": true,
+  "task_outcome": "success",
+  "settlement": "commit",
+  "replay_hash": "629f1b58eb76b04f9aab5bca82b750927e515172381f5b8e12ef7aaaf8dc90e6"
+}

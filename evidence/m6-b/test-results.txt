@@ -1,0 +1,21 @@
+
+running 16 tests
+test pg_effect_store::tests::b2b_non_success_rejects_commit ... ok
+test pg_effect_store::tests::b2a_no_decision_rejects_commit ... ok
+test pg_effect_store::tests::b6_outbox_consumer_marks_published ... ok
+test pg_effect_store::tests::b8_commit_success_receipt_failure_marker_recovery ... ok
+test pg_effect_store::tests::b2d_non_transactional_effect_blocks ... ok
+test pg_effect_store::tests::b2c_non_commit_settlement_blocks ... ok
+test pg_effect_store::tests::b3c_marker_idempotency_key_mismatch_detected ... ok
+test pg_effect_store::tests::b5_outbox_event_written_in_same_transaction ... ok
+test pg_effect_store::tests::b3_commit_marker_written_and_checked ... ok
+test pg_effect_store::tests::b2_verifier_fails_rollback ... ok
+test pg_effect_store::tests::b0_persist_and_load_decision ... ok
+test pg_effect_store::tests::b4_no_marker_safe_to_retry ... ok
+test pg_effect_store::tests::b4_marker_confirms_commit_after_crash ... ok
+test pg_effect_store::tests::b3_idempotency_prevents_double_commit ... ok
+test pg_effect_store::tests::b7_payload_conflict_detected ... ok
+test pg_effect_store::tests::b1_begin_execute_inspect_commit ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 86 filtered out; finished in 7.50s
+

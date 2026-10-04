@@ -1,0 +1,16 @@
+[package]
+name = "onto-assurance-domain-stubs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT OR Apache-2.0"
+description = "Future domain stubs — prove DomainPack trait extensibility"
+
+[dependencies]
+onto-assurance-types = { path = "../../onto-assurance-types" }
+onto-pack = { path = "../../onto-pack" }
+
+[dev-dependencies]
+
+[lints]
+workspace = true

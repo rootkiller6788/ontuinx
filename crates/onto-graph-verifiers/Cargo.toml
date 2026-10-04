@@ -1,0 +1,21 @@
+[package]
+name = "onto-graph-verifiers"
+version = "0.1.0"
+edition = "2021"
+description = "P7: Graph Integrity & Graph Risk verifiers for OntoAssure"
+
+[dependencies]
+onto-assurance-types = { path = "../onto-assurance-types" }
+onto-assurance-runtime = { path = "../onto-assurance-runtime" }
+onto-protocol = { path = "../onto-protocol" }
+tokio = { version = "1", features = ["macros", "rt"] }
+async-trait = "0.1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+chrono = "0.4"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }

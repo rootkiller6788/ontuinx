@@ -1,0 +1,20 @@
+{
+  "scenario": "environment_error",
+  "description": "Docker daemon unresponsive — verifier cannot create sandbox",
+  "exit_reason": "crashed",
+  "contract": {
+    "objective": "Run integration tests",
+    "effect_class": "staged",
+    "criteria": [
+      {"id": "c-tests", "name": "tests", "kind": "test_pass", "is_blocking": true}
+    ],
+    "approval_mode": "never"
+  },
+  "evidence": [],
+  "expected": {
+    "task_outcome": "environment_error",
+    "budget_outcome": "within_budget",
+    "lifecycle_state": "escalated",
+    "settlement": "freeze"
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "milestone": "OntoLoop v0.1 — Single-Task Attempt Convergence",
+  "status": "CLOSED AND SEALED",
+  "date": "2026-07-26",
+  "scope": "single task, serial attempts, structured continuation, checkpoint/evidence/decision binding, deterministic progress detection, budget/stuck control, 1:1 attempt↔run mapping",
+  "test_counts": {
+    "onto-loop_crate": 13,
+    "loop_adapter": 4,
+    "total_ontoloop": 17,
+    "total_workspace": 140
+  },
+  "sub_milestones": {
+    "L0": { "status": "CLOSED", "description": "Attempt data model + state machine" },
+    "L1": { "status": "CLOSED", "description": "Single-attempt lifecycle: start→run→evaluate→decide" },
+    "L2": { "status": "CLOSED", "description": "Structured continuation from OntoAssure gaps (not fuzzy prompts)" },
+    "L3": { "status": "CLOSED", "description": "Checkpoint/Evidence/Decision binding (4 tests)" },
+    "L4": { "status": "CLOSED", "description": "Deterministic Progress/Regression detection (5 tests)" },
+    "L5": { "status": "CLOSED", "description": "Budget/Stuck control with orthogonal state (4 tests)" },
+    "L6": { "status": "CLOSED", "description": "Thin OntoRuntime adapter — 1:1 attempt↔run (3 tests)" },
+    "L7": { "status": "CLOSED", "description": "Two-attempt E2E: Failed→Continue→Success→Commit (1 test)" }
+  },
+  "root_invariants": [
+    "Model has no success authority",
+    "Tool execution success ≠ task success",
+    "Old evidence cannot prove new checkpoint",
+    "Failed attempts can be structurally continued",
+    "Regression triggers rollback to known-good checkpoint",
+    "No-progress and budget exhaustion stop the loop",
+    "Final terminal state only comes from OntoAssure",
+    "One Attempt = One OntoRuntime Run (strict 1:1)",
+    "OntoLoop never directly calls Capabilities",
+    "OntoLoop never self-produces Success"
+  ],
+  "known_limitations": [
+    "Single task, serial attempts only",
+    "No multi-agent parallelism",
+    "No search tree or branch merging",
+    "No cross-task DAG",
+    "No distributed scheduling",
+    "No long-running timers or signals (→ OntoFlow)"
+  ],
+  "regression_gate": [
+    "Attempt lifecycle", "ContinuationDirective", "Checkpoint binding",
+    "Progress comparison", "Budget policy", "Loop adapter",
+    "RunIngressPort", "AssuranceResultPort", "Decision projection"
+  ]
+}

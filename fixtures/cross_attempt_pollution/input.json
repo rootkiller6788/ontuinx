@@ -1,0 +1,18 @@
+{
+  "scenario": "cross_attempt_pollution",
+  "description": "Evidence from attempt 1 is reused in attempt 2 — must be rejected",
+  "attempt_1": {
+    "evidence": [
+      {"criterion_id": "c-tests", "kind": "test_output", "payload": {"passed": true, "tests": 9}}
+    ]
+  },
+  "attempt_2": {
+    "evidence": [
+      {"criterion_id": "c-tests", "kind": "test_output", "payload": {"passed": true, "tests": 9}}
+    ]
+  },
+  "expected": {
+    "cross_attempt_evidence_rejected": true,
+    "attempt_2_must_generate_new_evidence": true
+  }
+}

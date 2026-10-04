@@ -1,0 +1,18 @@
+[package]
+name = "onto-pack-sdk"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT OR Apache-2.0"
+description = "Onto Pack SDK — verifier traits and artifact adapters for industry packs"
+
+[dependencies]
+onto-assurance-types = { path = "../onto-assurance-types" }
+onto-assurance-core = { path = "../onto-assurance-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-trait = "0.1"
+thiserror = "2"
+
+[lints]
+workspace = true

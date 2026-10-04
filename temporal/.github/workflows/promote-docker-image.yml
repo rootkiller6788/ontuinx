@@ -1,0 +1,123 @@
+name: Promote Docker Image
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: "Image name (e.g., server, admin-tools)"
+        required: true
+        type: string
+      source-tag:
+        description: "Source tag from temporaliotest registry (e.g. sha-abc123)"
+        required: true
+        type: string
+      target-tags:
+        description: "Target tags for temporalio registry (comma or newline separated, e.g., 1.29.1, latest)"
+        required: true
+        type: string
+    secrets:
+      DOCKERHUB_USERNAME:
+        required: true
+      DOCKERHUB_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate-inputs:
+    runs-on: ubuntu-latest
+    outputs:
+      source-tag-safe: ${{ steps.validate.outputs.source-tag }}
+      target-tags-safe: ${{ steps.validate.outputs.target-tags }}
+    steps:
+      - name: Validate input tags
+        id: validate
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          SOURCE_TAG: ${{ inputs.source-tag }}
+          TARGET_TAGS: ${{ inputs.target-tags }}
+        with:
+          script: |
+            const sourceTag = process.env.SOURCE_TAG;
+            const targetTagsInput = process.env.TARGET_TAGS;
+
+            // Source tag: must be short SHA (sha-XXXXXXX) or full sha256 digest
+            // Examples: sha-b5b2dfe, sha256:082943409e71ae50d8dd8693593070eac8173f01fb5bfd4970ae59e52176753e
+            const sourceTagPattern = /^sha-[a-f0-9]{7,}$|^sha256:[a-f0-9]{64}$/;
+
+            // Target tag: semantic version pattern (major.minor.patch.build or shorter)
+            // Examples: 1.29.1, 1.29.1.1, 1.29, latest
+            const targetTagPattern = /^(\d+\.)*\d+$|^latest$/;
+
+            // Validate source tag format
+            if (!sourceTagPattern.test(sourceTag)) {
+              core.setFailed('Error: Invalid source tag format. Must be sha-XXXXXXX or sha256:...');
+              return;
+            }
+
+            // Parse and validate target tags (split by newline or comma)
+            const targetTags = targetTagsInput
+              .split(/[\n,]/)
+              .map(tag => tag.trim())
+              .filter(tag => tag.length > 0);
+
+            if (targetTags.length === 0) {
+              core.setFailed('Error: At least one target tag must be provided');
+              return;
+            }
+
+            for (const tag of targetTags) {
+              if (!targetTagPattern.test(tag)) {
+                core.setFailed(`Error: Invalid target tag format: "${tag}". Must be semantic version (e.g., 1.29.1, 1.29.1.1) or "latest"`);
+                return;
+              }
+            }
+
+            core.setOutput('source-tag', sourceTag);
+            core.setOutput('target-tags', JSON.stringify(targetTags));
+
+            core.info('✓ Tag validation passed');
+            core.info(`  Source: ${sourceTag}`);
+            core.info(`  Target tags: ${targetTags.join(', ')}`);
+
+  promote:
+    needs: [validate-inputs]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log in to Docker Hub
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Install crane
+        run: |
+          curl -sL https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz | tar xz crane
+          sudo mv crane /usr/local/bin/
+
+      - name: Promote image
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          SOURCE_TAG: ${{ needs.validate-inputs.outputs.source-tag-safe }}
+          TARGET_TAGS: ${{ needs.validate-inputs.outputs.target-tags-safe }}
+          IMAGE_NAME: ${{ inputs.image-name }}
+        with:
+          script: |
+            const { execSync } = require('child_process');
+            const sourceTag = process.env.SOURCE_TAG;
+            const targetTags = JSON.parse(process.env.TARGET_TAGS);
+            const imageName = process.env.IMAGE_NAME;
+            const source = `temporaliotest/${imageName}:${sourceTag}`;
+
+            core.info(`Promoting ${imageName} image...`);
+            core.info(`  From: ${source}`);
+            core.info(`  To: ${targetTags.map(t => `temporalio/${imageName}:${t}`).join(', ')}`);
+
+            for (const tag of targetTags) {
+              const target = `temporalio/${imageName}:${tag}`;
+              core.info(`Copying ${source} -> ${target}`);
+              execSync(`crane copy ${source} ${target}`, { stdio: 'inherit' });
+            }
+
+            core.info(`${imageName} image promoted successfully to all tags`);

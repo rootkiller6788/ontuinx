@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ontoos.dev/schemas/v1/execution_contract.schema.json",
+  "title": "ExecutionContract",
+  "description": "Immutable contract binding an Agent run to acceptance criteria, evidence requirements, and constraints.",
+  "type": "object",
+  "required": ["contract_id", "intent_id", "criteria", "approval_mode", "max_attempts", "created_at"],
+  "properties": {
+    "contract_id": { "type": "string", "format": "uuid" },
+    "intent_id": { "type": "string", "format": "uuid" },
+    "criteria": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/AcceptanceCriterion" }
+    },
+    "evidence_required": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/EvidenceRequirement" }
+    },
+    "approval_mode": { "$ref": "#/$defs/ApprovalMode" },
+    "max_attempts": { "type": "integer", "minimum": 1, "maximum": 10 },
+    "created_at": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "AcceptanceCriterion": {
+      "type": "object",
+      "required": ["criterion_id", "name", "kind", "is_blocking"],
+      "properties": {
+        "criterion_id": { "type": "string", "format": "uuid" },
+        "name": { "type": "string" },
+        "kind": { "enum": ["test_pass", "lint_pass", "type_check_pass", "benchmark_ok", "no_regression"] },
+        "description": { "type": "string" },
+        "is_blocking": { "type": "boolean" }
+      }
+    },
+    "EvidenceRequirement": {
+      "type": "object",
+      "required": ["kind", "is_required"],
+      "properties": {
+        "kind": { "enum": ["diff", "test_result", "lint_result", "verdict", "human_approval"] },
+        "is_required": { "type": "boolean" }
+      }
+    },
+    "ApprovalMode": {
+      "enum": ["never", "on_failure", "on_high_risk", "always"]
+    }
+  }
+}

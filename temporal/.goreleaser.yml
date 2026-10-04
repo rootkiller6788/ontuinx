@@ -1,0 +1,96 @@
+# GoReleaser v2 configuration
+version: 2
+
+before:
+  hooks:
+    - go mod download
+
+snapshot:
+  version_template: "{{ .Version }}-SNAPSHOT-{{ .ShortCommit }}"
+
+archives:
+  - id: default
+    ids:
+      - temporal-server
+      - temporal-cassandra-tool
+      - temporal-sql-tool
+      - temporal-elasticsearch-tool
+      - tdbg
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - ./config/*
+
+builds:
+  - id: temporal-server
+    dir: cmd/server
+    binary: temporal-server
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+  - id: temporal-cassandra-tool
+    dir: cmd/tools/cassandra
+    binary: temporal-cassandra-tool
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+  - id: temporal-sql-tool
+    dir: cmd/tools/sql
+    binary: temporal-sql-tool
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+  - id: temporal-elasticsearch-tool
+    dir: cmd/tools/elasticsearch
+    binary: temporal-elasticsearch-tool
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+  - id: tdbg
+    dir: cmd/tools/tdbg
+    binary: tdbg
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+changelog:
+  disable: true
+
+announce:
+  skip: true

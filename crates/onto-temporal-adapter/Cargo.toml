@@ -1,0 +1,34 @@
+[package]
+name = "onto-temporal-adapter"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT OR Apache-2.0"
+description = "OntoFlow Adapter — bridges OntoFlow ActivityTask to Rust OntoLoop Worker"
+
+[dependencies]
+onto-assurance-types = { path = "../onto-assurance-types" }
+onto-assurance-core = { path = "../onto-assurance-core" }
+onto-assurance-runtime = { path = "../onto-assurance-runtime" }
+onto-protocol = { path = "../onto-protocol" }
+onto-loop = { path = "../onto-loop" }
+onto-ironclaw-adapter = { path = "../onto-ironclaw-adapter" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-trait = "0.1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+hex = "0.4"
+
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+
+[[bin]]
+name = "onto-worker"
+path = "src/bin/worker.rs"
+
+[dev-dependencies]
+
+[lints]
+workspace = true

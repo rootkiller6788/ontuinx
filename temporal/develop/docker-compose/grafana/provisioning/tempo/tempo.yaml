@@ -1,0 +1,48 @@
+# Copied from https://github.com/grafana/tempo/blob/main/example/docker-compose/single-binary/tempo.yaml
+stream_over_http_enabled: true
+
+server:
+  http_listen_port: 3200
+  log_level: info
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: "tempo:4317"
+        http:
+          endpoint: "tempo:4318"
+
+metrics_generator:
+  registry:
+    external_labels:
+      source: tempo
+      cluster: docker-compose
+  storage:
+    path: /var/tempo/generator/wal
+    remote_write:
+      - url: http://prometheus:9090/api/v1/write
+        send_exemplars: true
+
+query_frontend:
+  mcp_server:
+    enabled: true
+
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal # where to store the wal locally
+    local:
+      path: /var/tempo/blocks
+
+overrides:
+  defaults:
+    metrics_generator:
+      processors: ["span-metrics", "service-graphs"]
+      generate_native_histograms: both
+
+
+usage_report:
+  reporting_enabled: false

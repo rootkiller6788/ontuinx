@@ -1,0 +1,108 @@
+{
+  "project": "OntoFlow v0.1",
+  "timestamp": "2026-07-27T09:45:00+08:00",
+  "status": "IMPLEMENTATION_AND_HARNESS_COMPLETE",
+
+  "completed": {
+    "implementation": {
+      "OntoAssure_Core": "CLOSED",
+      "M5_Success_Authority": "CLOSED",
+      "M6_Effect_Authority": "CLOSED",
+      "OntoLoop_v0_1": "CLOSED",
+      "OntoRuntime_Adapter": "CODE_COMPLETE"
+    },
+    "temporal_integration": {
+      "OntoFlow_Fork_Build": true,
+      "CHASM_OntoFlow_Registration": true,
+      "OntoFlow_Domain_Model": true,
+      "Go_Rust_Protocol": "FROZEN_v1",
+      "DAG_Batch_Planning_Discussion": "IMPLEMENTED"
+    },
+    "acceptance_harness": {
+      "I0_Code_Migration": "CLOSED (21 .go files in temporal/chasm/lib/ontoflow/)",
+      "I1_Build_Integration": "CLOSED (63 Go tests, ontoflow compiles with Go 1.26)",
+      "I2_A_OntoFlow_Server_CHASM_Runtime": "CLOSED (197MB binary v1.32.0, OntoFlow registered)",
+      "I2_B_WorkItem_Dispatch_Semantics": "CLOSED (OutcomeReported ≠ Committed proven)",
+      "I3_OntoLoop_Runtime_Integration": "CLOSED (8/8: 2-attempt, Decision+Checkpoint bound)",
+      "I4_Authority_Resolution_Logic": "CLOSED (12 tests: Decision bindings verified)",
+      "I4_Authority_Binding_Invariants": "CLOSED (missing/wrong/old rejected)",
+      "I5_DAG_Concurrency_Semantics": "CLOSED (8 Go + 6 Rust: sequence, fan-in/out, cycle detection)",
+      "I6_Recovery_State_Machine": "CLOSED (9 Go + 5 Rust: lease, idempotency, generation guard)",
+      "I6_Idempotency_Invariants": "CLOSED (single-node fault simulation)"
+    }
+  },
+
+  "pending_real_runtime": {
+    "R0_Real_OntoFlow_Rust_Worker": {
+      "status": "PENDING",
+      "description": "Replace file/stdin with gRPC PollActivityTaskQueue/Heartbeat/RespondActivityTaskCompleted",
+      "acceptance": [
+        "Task passes through real Matching",
+        "Worker stop → task stays in queue",
+        "Dual workers → only one receives valid task",
+        "Task Token correctly completes",
+        "Heartbeat timeout triggers re-dispatch"
+      ]
+    },
+    "R1_Real_OntoRuntime_Attempt_Execution": {
+      "status": "PENDING",
+      "description": "Replace MockLoopRuntime with real OntoRuntime Agent Loop via RuntimeRunPort",
+      "acceptance": [
+        "Attempt 1 writes wrong file → Verifier UNSAT",
+        "Attempt 2 receives structured continuation gap",
+        "Attempt 2 fixes → Success + M6-A Publish",
+        "Real CapabilityHost → Before/After Hook → Verifier → OntoAssure"
+      ]
+    },
+    "R2_Real_PostgreSQL_Authority": {
+      "status": "PENDING",
+      "description": "Replace in-memory mocks with real PostgreSQL Decision/Receipt/Transaction stores",
+      "acceptance": [
+        "Real Decision exists → Committed",
+        "Real Receipt bound → Committed",
+        "PG unavailable → NOT Committed (no downgrade to trust Worker)",
+        "Query timeout → NOT Committed",
+        "Recovery after PG restart → Authority Resolution continues"
+      ]
+    },
+    "R3_Real_Multi_Process_Fault_DAG": {
+      "status": "PENDING",
+      "description": "Distributed fault injection with real OntoFlow + PG + 2 Rust Workers + Authority",
+      "acceptance": [
+        "kill Worker A → task re-dispatched, same loop_id",
+        "stop Heartbeat → timeout → re-dispatch",
+        "Commit then kill Worker → idempotent re-Respond",
+        "restart Temporal Server → state recovery",
+        "delay old generation envelope → rejected",
+        "two Workers resume simultaneously → only one holds lease",
+        "A→B,C→D DAG with B/C on different Workers",
+        "D only starts after B+C AuthorityVerified",
+        "Zero duplicate loops, attempts, side effects"
+      ]
+    }
+  },
+
+  "key_invariants_proven": [
+    "ActivityTaskCompleted ≠ WorkItem Committed",
+    "Worker reported Committed ≠ WorkItem Committed",
+    "AuthorityVerified Success + Settlement = WorkItem Committed",
+    "One WorkItem = One stable loop_id",
+    "Old generation envelope rejected for new generation",
+    "Dual workers: only one holds LoopExecutionLease",
+    "Commit response lost → idempotent re-Respond",
+    "Escalated node blocks all downstream"
+  ],
+
+  "total_tests": {
+    "rust": "~400",
+    "go": 63,
+    "integration": 25,
+    "all_passing": true
+  },
+
+  "projection": {
+    "current": "OntoFlow v0.1 Implementation + Integration Harness Acceptance COMPLETE",
+    "next": "R0-R3 Real Runtime Acceptance (requires real infrastructure)",
+    "production": "v0.2 (HA, auth, TLS, audit, observability, load test)"
+  }
+}

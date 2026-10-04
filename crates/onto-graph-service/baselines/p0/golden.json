@@ -1,0 +1,12 @@
+{
+  "p0_baseline": {
+    "date": "2026-07-28",
+    "commit_sha": "3daac4447503b70520b1b25c2f07d071878fa79f",
+    "fixtures": {
+      "c-driver": {"nodes": 27, "edges": 40, "files": 3},
+      "py-service": {"nodes": 32, "edges": 64, "files": 1},
+      "ts-lib": {"nodes": 27, "edges": 70, "files": 4},
+      "java-app": {"nodes": 54, "edges": 114, "files": 4}
+    }
+  }
+}

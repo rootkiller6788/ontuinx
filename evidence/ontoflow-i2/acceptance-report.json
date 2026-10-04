@@ -1,0 +1,28 @@
+{
+  "phase": "I2",
+  "timestamp": "2026-07-27T00:26:00+08:00",
+  "status": "TEMPORAL_SERVER_BUILT",
+  "binary": "/tmp/temporal-server",
+  "version": "1.32.0",
+  "size": "197 MB",
+  "go_version": "1.26.0",
+  "proven": [
+    {"id": "I2-SERVER", "test": "Full temporal server binary compiled", "result": "PASS — 197MB ELF binary, version 1.32.0"},
+    {"id": "I2-ONTOFLOW", "test": "ontoflow package compiles in temporal repo", "result": "PASS"},
+    {"id": "I2-PG", "test": "OntoFlow + real PostgreSQL persistence", "result": "PASS"},
+    {"id": "I2-GATE", "test": "OutcomeReported ≠ Committed", "result": "PASS"},
+    {"id": "I2-RECOVERY", "test": "State recovery from PostgreSQL", "result": "PASS"},
+    {"id": "I2-RUST", "test": "Rust onto-temporal-adapter builds", "result": "PASS"}
+  ],
+  "patches_applied": [
+    "go.temporal.io/auto-scaled-workers: go.mod patched from go 1.26.4 → go 1.26.0",
+    "go.sum: auto-scaled-workers module hash updated",
+    "go.sum: auto-scaled-workers/go.mod hash updated",
+    "temporal/go.mod: go version lowered from 1.26.4 to 1.26.0",
+    "temporal/go.mod: tool directive removed (benchstat)"
+  ],
+  "blocked": [
+    {"id": "I2-MATCHING", "test": "Real Matching dispatch chain", "reason": "Requires starting temporal-server with config"}
+  ],
+  "next_action": "Start temporal-server with PostgreSQL config, then run Rust Worker"
+}

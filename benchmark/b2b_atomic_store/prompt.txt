@@ -1,0 +1,2 @@
+Fix the bugs in kvstore.c. The test suite reveals incorrect behavior.
+Run the tests to verify your fixes. All tests must pass and ASan must be clean.

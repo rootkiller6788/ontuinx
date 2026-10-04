@@ -1,0 +1,21 @@
+profile_id = "onto.code.generic.v1"
+description = "Generic fallback profile for unsupported languages"
+
+required_verifiers = [
+  "ironclaw-semantic"
+]
+
+[enforcement]
+build = "unavailable"
+test = "unavailable"
+lint = "unavailable"
+semantic = "advisory"
+
+[evidence]
+require_snapshot_binding = false
+require_location_resolution = false
+allow_unresolved_semantic_findings = true
+
+[budget]
+max_verifier_calls = 5
+max_tokens_per_semantic_unit = 2000

@@ -1,0 +1,74 @@
+# OntoOS Sandbox Profiles — grok-build (nono crate)
+# 默认路径: grok-build sandbox
+# 备选路径: Docker Compose (deploy/docker/)
+
+[profile.onto-worker]
+inherit = "workspace"
+description = "OntoLoop Rust Worker — 需要读写工作区"
+
+[profile.onto-worker.fs]
+writable = [
+    "/tmp/onto-worker",
+    "/tmp/staging",
+    "/evidence"
+]
+readable = [
+    "/home/admin1/OntoOS/target/debug",
+    "/home/admin1/OntoOS/crates",
+    "/usr/lib",
+    "/lib"
+]
+
+[profile.onto-authority]
+inherit = "read-only"
+description = "Authority Service — 只读，最小写权限"
+
+[profile.onto-authority.fs]
+writable = ["/tmp/onto-authority"]
+readable = [
+    "/home/admin1/OntoOS/target/debug",
+    "/home/admin1/OntoOS/crates",
+    "/var/run/postgresql"
+]
+
+[profile.onto-verifier]
+inherit = "strict"
+description = "Semantic Verification Lane B — 最严格"
+network = "blocked"
+
+[profile.onto-verifier.fs]
+writable = []
+readable = [
+    "/home/admin1/OntoOS/target/debug",
+    "/tmp/staging"
+]
+deny = [
+    "/home/admin1/OntoOS/temporal/**",
+    "/etc/passwd",
+    "/etc/shadow"
+]
+
+[profile.onto-temporal]
+inherit = "workspace"
+description = "Temporal Server"
+network = "allowed"
+
+[profile.onto-temporal.fs]
+writable = ["/tmp/temporal-root"]
+readable = [
+    "/home/admin1/OntoOS/temporal",
+    "/home/admin1/OntoOS/target/debug",
+    "/usr/lib",
+    "/lib"
+]
+
+# Deny 路径 — 全局阻止
+[global]
+deny_paths = [
+    "/etc/passwd",
+    "/etc/shadow",
+    "/root/.ssh",
+    "/home/*/.ssh",
+    "/proc/self/mem",
+    "/dev/mem"
+]

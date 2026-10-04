@@ -1,0 +1,46 @@
+{
+  "scenario": "success",
+  "description": "C project KVDB — build passes, 9/9 tests pass, all criteria satisfied",
+  "run_id": "kvdb-success-001",
+  "contract": {
+    "objective": "Implement a key-value database in C with get/put/delete operations",
+    "effect_class": "staged",
+    "risk_level": "medium",
+    "criteria": [
+      {
+        "id": "criterion-build",
+        "name": "build",
+        "kind": "test_pass",
+        "description": "Project must compile with gcc without errors",
+        "is_blocking": true
+      },
+      {
+        "id": "criterion-tests",
+        "name": "tests",
+        "kind": "test_pass",
+        "description": "All 9 KVDB tests must pass",
+        "is_blocking": true
+      }
+    ],
+    "approval_mode": "on_high_risk",
+    "max_attempts": 3
+  },
+  "evidence": [
+    {
+      "criterion_id": "criterion-build",
+      "kind": "verifier_report",
+      "payload": { "passed": true, "toolchain": "gcc", "output": "gcc -o kvdb main.c kvdb.c\nBuild OK" }
+    },
+    {
+      "criterion_id": "criterion-tests",
+      "kind": "test_output",
+      "payload": { "passed": true, "total": 9, "passed_count": 9, "failed": 0, "output": "test result: ok. 9 passed; 0 failed" }
+    }
+  ],
+  "expected": {
+    "task_outcome": "success",
+    "budget_outcome": "within_budget",
+    "lifecycle_state": "committed",
+    "settlement": "commit"
+  }
+}

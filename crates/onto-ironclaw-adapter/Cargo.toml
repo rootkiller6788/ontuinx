@@ -1,0 +1,60 @@
+[package]
+name = "onto-ironclaw-adapter"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT OR Apache-2.0"
+description = "Onto ↔ OntoRuntime adapter — bridges Port traits to OntoRuntime concrete types"
+
+[dependencies]
+onto-assurance-types = { path = "../onto-assurance-types" }
+onto-assurance-core = { path = "../onto-assurance-core" }
+onto-assurance-runtime = { path = "../onto-assurance-runtime", features = ["test-support"] }
+onto-protocol = { path = "../onto-protocol" }
+onto-loop = { path = "../onto-loop" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-trait = "0.1"
+thiserror = "2"
+chrono = { version = "0.4", features = ["serde"] }
+walkdir = "2"
+sha2 = "0.10"
+hex = "0.4"
+tokio = { version = "1", features = ["macros", "rt"] }
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1"] }
+redis = { version = "0.25", features = ["tokio-comp", "streams"] }
+ontofirmwaregraphd = { path = "../onto-graph-service" }
+tonic = "0.12"
+prost = "0.13"
+
+# ── Feature: ironclaw-integration ──
+# Requires sibling repo ironclaw-main/ at ../../../ironclaw-main/
+# Uncomment below + add the three [dependencies] blocks to enable:
+#
+# [features]
+# ironclaw-integration = [
+#     "dep:ironclaw_authorization",
+#     "dep:ironclaw_host_api",
+#     "dep:ironclaw_host_runtime",
+# ]
+#
+# [dependencies.ironclaw_authorization]
+# path = "../../../ironclaw-main/crates/ironclaw_authorization"
+# optional = true
+# [dependencies.ironclaw_host_api]
+# path = "../../../ironclaw-main/crates/ironclaw_host_api"
+# optional = true
+# [dependencies.ironclaw_host_runtime]
+# path = "../../../ironclaw-main/crates/ironclaw_host_runtime"
+# optional = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+onto-pack = { path = "../onto-pack" }
+onto-assurance-domain-code = { path = "../domains/code" }
+uuid = { version = "1", features = ["v4"] }
+tempfile = "3"
+sha2 = "0.10"
+hex = "0.4"

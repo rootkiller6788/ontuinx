@@ -1,0 +1,10 @@
+{
+  "scenario": "budget_depleted_success",
+  "chain_valid": true,
+  "record_count": 1,
+  "evidence_hash": "0db03ffe652d21a888c1d6ae0284028a70dc3894bcba3da9ceac4926e2e56849",
+  "overall_passed": true,
+  "task_outcome": "success",
+  "settlement": "commit",
+  "replay_hash": "ed6990d73bb20c7062cce9de67b95dce50fe153f8ec5bd57f31f45a91654129d"
+}

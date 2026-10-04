@@ -1,0 +1,83 @@
+{
+  "phase": "I2",
+  "name": "Real Activity/Matching/Rust Bridge",
+  "status": "INFRASTRUCTURE_BLOCKED",
+  "prerequisites": [
+    "Running Temporal Server with CHASM OntoFlowLibrary registered",
+    "Running PostgreSQL for OntoFlow persistence",
+    "Running Rust Worker polling onto-loop-v0 task queue",
+    "Ability to start a single-WorkItem OntoFlow"
+  ],
+  "acceptance_tests": [
+    {
+      "id": "I2-1",
+      "test": "Temporal Server starts with OntoFlowLibrary registered",
+      "evidence": "temporal-server-startup.log",
+      "assert": "log contains 'OntoFlowLibrary registered'"
+    },
+    {
+      "id": "I2-2",
+      "test": "WorkItem creates real ActivityTask",
+      "evidence": "activity-scheduled.log",
+      "assert": "ActivityTaskScheduled event exists with type='execute_onto_loop'"
+    },
+    {
+      "id": "I2-3",
+      "test": "ActivityTask enters Matching onto-loop-v0 queue",
+      "evidence": "matching-dispatch.log",
+      "assert": "task queue='onto-loop-v0', not direct gRPC"
+    },
+    {
+      "id": "I2-4",
+      "test": "Rust Worker polls and receives task",
+      "evidence": "rust-worker-poll.log",
+      "assert": "LoopInvocationRequest fields match: flow_id, work_item_id, loop_id, request_binding_hash"
+    },
+    {
+      "id": "I2-5",
+      "test": "Go/Rust request fields and binding hash match",
+      "evidence": "binding-hash-verification.log",
+      "assert": "request_binding_hash identical between Go send and Rust receive"
+    },
+    {
+      "id": "I2-6",
+      "test": "Rust Worker sends at least one real Heartbeat",
+      "evidence": "heartbeat.log",
+      "assert": "RecordActivityTaskHeartbeat called at least once"
+    },
+    {
+      "id": "I2-7",
+      "test": "Completion returns to correct Flow and WorkItem",
+      "evidence": "activity-completion.log",
+      "assert": "RespondActivityTaskCompleted returns envelope to correct component"
+    },
+    {
+      "id": "I2-8",
+      "test": "ActivityCompleted → OutcomeReported, NOT Committed",
+      "evidence": "flow-state-transition.log",
+      "assert": "WorkItem phase is 'outcome_reported', not 'committed'"
+    }
+  ],
+  "negative_tests": [
+    {
+      "id": "I2-N1",
+      "test": "Worker returns Committed with no decision_id → not Committed",
+      "assert": "WorkItem not Committed; Authority verification fails"
+    },
+    {
+      "id": "I2-N2",
+      "test": "Rust Worker stopped → WorkItem stays Dispatched/Running, NOT error from direct gRPC",
+      "assert": "proves Matching dispatch, not direct RPC"
+    }
+  ],
+  "trace_identity_fields": [
+    "flow_id",
+    "work_item_id",
+    "loop_id",
+    "activity_id",
+    "scheduled_event_id",
+    "execution_generation",
+    "idempotency_key",
+    "request_binding_hash"
+  ]
+}

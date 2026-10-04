@@ -1,0 +1,10 @@
+{
+  "scenario": "environment_error",
+  "chain_valid": true,
+  "record_count": 0,
+  "evidence_hash": "conformance-genesis",
+  "overall_passed": false,
+  "task_outcome": "environmenterror",
+  "settlement": "freeze { reason: reasoncode { domain: \"infrastructure\", code: \"environment_error\", detail: \"infrastructure failure — freezing for manual review\" } }",
+  "replay_hash": "4f37b9974813562fb2fb55962bc4da2bc365faca8d5e161de10004c83dad05ca"
+}

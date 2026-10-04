@@ -1,0 +1,254 @@
+package chasm
+
+import (
+	"context"
+	"sync"
+	"time"
+
+	enumspb "go.temporal.io/api/enums/v1"
+	historypb "go.temporal.io/api/history/v1"
+	enumsspb "go.temporal.io/server/api/enums/v1"
+	persistencespb "go.temporal.io/server/api/persistence/v1"
+	"go.temporal.io/server/common/definition"
+	"go.temporal.io/server/common/namespace"
+	"go.temporal.io/server/common/nexus/nexusrpc"
+	"go.temporal.io/server/service/history/tasks"
+)
+
+var _ NodeBackend = (*MockNodeBackend)(nil)
+
+// MockNodeBackend is a lightweight manual mock for the NodeBackend interface.
+// Methods may be stubbed by assigning the corresponding Handle fields. Update call history is recorded in the struct
+// fields (thread-safe).
+type MockNodeBackend struct {
+	// Optional function overrides. If nil, methods return zero-values.
+	HandleGetExecutionState           func() *persistencespb.WorkflowExecutionState
+	HandleGetExecutionInfo            func() *persistencespb.WorkflowExecutionInfo
+	HandleGetCurrentVersion           func() int64
+	HandleNextTransitionCount         func() int64
+	HandleGetApproximatePersistedSize func() int
+	HandleCurrentVersionedTransition  func() *persistencespb.VersionedTransition
+	HandleGetWorkflowKey              func() definition.WorkflowKey
+	HandleUpdateWorkflowStateStatus   func(state enumsspb.WorkflowExecutionState, status enumspb.WorkflowExecutionStatus) (bool, error)
+	HandleIsWorkflow                  func() bool
+	HandleGetNexusCompletion          func(ctx context.Context, requestID string) (nexusrpc.CompleteOperationOptions, error)
+	HandleGetNexusUpdateCompletion    func(ctx context.Context, updateID string, requestID string) (nexusrpc.CompleteOperationOptions, error)
+	HandleAddHistoryEvent             func(t enumspb.EventType, setAttributes func(*historypb.HistoryEvent)) *historypb.HistoryEvent
+	HandleLoadHistoryEvent            func(ctx context.Context, token []byte) (*historypb.HistoryEvent, error)
+	HandleGenerateEventLoadToken      func(event *historypb.HistoryEvent) ([]byte, error)
+	HandleHasAnyBufferedEvent         func(filter func(*historypb.HistoryEvent) bool) bool
+	HandleGetNamespaceEntry           func() *namespace.Namespace
+	HandleEndpointRegistry            func() EndpointRegistry
+
+	// Recorded calls (protected by mu).
+	mu                  sync.Mutex
+	TasksByCategory     map[tasks.Category][]tasks.Task
+	DeletePureTaskCalls []time.Time
+	UpdateCalls         []struct {
+		State  enumsspb.WorkflowExecutionState
+		Status enumspb.WorkflowExecutionStatus
+	}
+}
+
+func (m *MockNodeBackend) GetExecutionState() *persistencespb.WorkflowExecutionState {
+	if m.HandleGetExecutionState != nil {
+		return m.HandleGetExecutionState()
+	}
+	return &persistencespb.WorkflowExecutionState{}
+}
+
+func (m *MockNodeBackend) GetExecutionInfo() *persistencespb.WorkflowExecutionInfo {
+	if m.HandleGetExecutionInfo != nil {
+		return m.HandleGetExecutionInfo()
+	}
+	return &persistencespb.WorkflowExecutionInfo{}
+}
+
+func (m *MockNodeBackend) GetApproximatePersistedSize() int {
+	if m.HandleGetApproximatePersistedSize != nil {
+		return m.HandleGetApproximatePersistedSize()
+	}
+	return 0
+}
+
+func (m *MockNodeBackend) GetCurrentVersion() int64 {
+	if m.HandleGetCurrentVersion != nil {
+		return m.HandleGetCurrentVersion()
+	}
+	return 0
+}
+
+func (m *MockNodeBackend) NextTransitionCount() int64 {
+	if m.HandleNextTransitionCount != nil {
+		return m.HandleNextTransitionCount()
+	}
+	return 0
+}
+
+func (m *MockNodeBackend) CurrentVersionedTransition() *persistencespb.VersionedTransition {
+	if m.HandleCurrentVersionedTransition != nil {
+		return m.HandleCurrentVersionedTransition()
+	}
+	return nil
+}
+
+func (m *MockNodeBackend) GetWorkflowKey() definition.WorkflowKey {
+	if m.HandleGetWorkflowKey != nil {
+		return m.HandleGetWorkflowKey()
+	}
+	return definition.WorkflowKey{}
+}
+
+func (m *MockNodeBackend) AddTasks(ts ...tasks.Task) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.TasksByCategory == nil {
+		m.TasksByCategory = make(map[tasks.Category][]tasks.Task, 1)
+	}
+	for _, task := range ts {
+		category := task.GetCategory()
+		m.TasksByCategory[category] = append(m.TasksByCategory[category], task)
+	}
+}
+
+func (m *MockNodeBackend) DeleteCHASMPureTasks(maxScheduledTime time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.DeletePureTaskCalls = append(m.DeletePureTaskCalls, maxScheduledTime)
+}
+
+func (m *MockNodeBackend) LastDeletePureTaskCall() time.Time {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if len(m.DeletePureTaskCalls) == 0 {
+		return time.Time{}
+	}
+	return m.DeletePureTaskCalls[len(m.DeletePureTaskCalls)-1]
+}
+
+func (m *MockNodeBackend) UpdateWorkflowStateStatus(
+	state enumsspb.WorkflowExecutionState,
+	status enumspb.WorkflowExecutionStatus,
+) (bool, error) {
+	if m.HandleUpdateWorkflowStateStatus != nil {
+		ok, err := m.HandleUpdateWorkflowStateStatus(state, status)
+
+		m.mu.Lock()
+		m.UpdateCalls = append(m.UpdateCalls, struct {
+			State  enumsspb.WorkflowExecutionState
+			Status enumspb.WorkflowExecutionStatus
+		}{State: state, Status: status})
+		m.mu.Unlock()
+
+		return ok, err
+	}
+
+	m.mu.Lock()
+	m.UpdateCalls = append(m.UpdateCalls, struct {
+		State  enumsspb.WorkflowExecutionState
+		Status enumspb.WorkflowExecutionStatus
+	}{State: state, Status: status})
+	m.mu.Unlock()
+
+	return false, nil
+}
+
+func (m *MockNodeBackend) LastUpdateWorkflowState() enumsspb.WorkflowExecutionState {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.UpdateCalls) == 0 {
+		return enumsspb.WORKFLOW_EXECUTION_STATE_UNSPECIFIED
+	}
+	return m.UpdateCalls[len(m.UpdateCalls)-1].State
+}
+
+func (m *MockNodeBackend) LastUpdateWorkflowStatus() enumspb.WorkflowExecutionStatus {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.UpdateCalls) == 0 {
+		return enumspb.WORKFLOW_EXECUTION_STATUS_UNSPECIFIED
+	}
+	return m.UpdateCalls[len(m.UpdateCalls)-1].Status
+}
+
+func (m *MockNodeBackend) IsWorkflow() bool {
+	if m.HandleIsWorkflow != nil {
+		return m.HandleIsWorkflow()
+	}
+	return false
+}
+
+func (m *MockNodeBackend) GetNexusCompletion(
+	ctx context.Context,
+	requestID string,
+) (nexusrpc.CompleteOperationOptions, error) {
+	if m.HandleGetNexusCompletion != nil {
+		return m.HandleGetNexusCompletion(ctx, requestID)
+	}
+	return nexusrpc.CompleteOperationOptions{}, nil
+}
+
+func (m *MockNodeBackend) AddHistoryEvent(t enumspb.EventType, setAttributes func(*historypb.HistoryEvent)) *historypb.HistoryEvent {
+	if m.HandleAddHistoryEvent != nil {
+		return m.HandleAddHistoryEvent(t, setAttributes)
+	}
+	return nil
+}
+
+func (m *MockNodeBackend) GenerateEventLoadToken(event *historypb.HistoryEvent) ([]byte, error) {
+	if m.HandleGenerateEventLoadToken != nil {
+		return m.HandleGenerateEventLoadToken(event)
+	}
+	return []byte("test token"), nil
+}
+
+func (m *MockNodeBackend) LoadHistoryEvent(ctx context.Context, token []byte) (*historypb.HistoryEvent, error) {
+	if m.HandleLoadHistoryEvent != nil {
+		return m.HandleLoadHistoryEvent(ctx, token)
+	}
+	return nil, nil
+}
+
+func (m *MockNodeBackend) HasAnyBufferedEvent(filter func(*historypb.HistoryEvent) bool) bool {
+	if m.HandleHasAnyBufferedEvent != nil {
+		return m.HandleHasAnyBufferedEvent(filter)
+	}
+	return false
+}
+
+func (m *MockNodeBackend) GetNamespaceEntry() *namespace.Namespace {
+	if m.HandleGetNamespaceEntry != nil {
+		return m.HandleGetNamespaceEntry()
+	}
+	return nil
+}
+
+func (m *MockNodeBackend) EndpointRegistry() EndpointRegistry {
+	if m.HandleEndpointRegistry != nil {
+		return m.HandleEndpointRegistry()
+	}
+	return nil
+}
+
+func (m *MockNodeBackend) GetNexusUpdateCompletion(
+	ctx context.Context,
+	updateID string,
+	requestID string,
+) (nexusrpc.CompleteOperationOptions, error) {
+	if m.HandleGetNexusUpdateCompletion != nil {
+		return m.HandleGetNexusUpdateCompletion(ctx, updateID, requestID)
+	}
+	return nexusrpc.CompleteOperationOptions{}, nil
+}
+
+func (m *MockNodeBackend) NumTasksAdded() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	count := 0
+	for _, ts := range m.TasksByCategory {
+		count += len(ts)
+	}
+	return count
+}

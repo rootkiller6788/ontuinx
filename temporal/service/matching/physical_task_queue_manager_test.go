@@ -1,0 +1,792 @@
+package matching
+
+import (
+	"context"
+	"math"
+	"math/rand"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/suite"
+	enumspb "go.temporal.io/api/enums/v1"
+	taskqueuepb "go.temporal.io/api/taskqueue/v1"
+	"go.temporal.io/server/api/matchingservicemock/v1"
+	persistencespb "go.temporal.io/server/api/persistence/v1"
+	"go.temporal.io/server/common"
+	"go.temporal.io/server/common/cluster"
+	"go.temporal.io/server/common/dynamicconfig"
+	"go.temporal.io/server/common/goro"
+	"go.temporal.io/server/common/metrics"
+	"go.temporal.io/server/common/metrics/metricstest"
+	"go.temporal.io/server/common/namespace"
+	"go.temporal.io/server/common/primitives/timestamp"
+	"go.temporal.io/server/common/quotas"
+	"go.temporal.io/server/common/testing/await"
+	"go.temporal.io/server/common/testing/testlogger"
+	"go.temporal.io/server/common/tqid"
+	"go.uber.org/mock/gomock"
+	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
+	"google.golang.org/protobuf/types/known/wrapperspb"
+)
+
+var rpsInf = math.Inf(1)
+
+const (
+	defaultNamespaceId = "deadbeef-0000-4567-890a-bcdef0123456"
+	defaultRootTqID    = "tq"
+)
+
+type PhysicalTaskQueueManagerTestSuite struct {
+	suite.Suite
+
+	newMatcher           bool
+	fairness             bool
+	config               *Config
+	controller           *gomock.Controller
+	physicalTaskQueueKey *PhysicalTaskQueueKey
+	matchingClientMock   *matchingservicemock.MockMatchingServiceClient
+	tqMgr                *physicalTaskQueueManagerImpl
+}
+
+// TODO(pri): cleanup; delete this
+func TestPhysicalTaskQueueManager_Classic_Suite(t *testing.T) {
+	suite.Run(t, &PhysicalTaskQueueManagerTestSuite{newMatcher: false})
+}
+
+func TestPhysicalTaskQueueManager_Pri_Suite(t *testing.T) {
+	suite.Run(t, &PhysicalTaskQueueManagerTestSuite{newMatcher: true})
+}
+
+func TestPhysicalTaskQueueManager_Fair_TestSuite(t *testing.T) {
+	suite.Run(t, &PhysicalTaskQueueManagerTestSuite{newMatcher: true, fairness: true})
+}
+
+func (s *PhysicalTaskQueueManagerTestSuite) SetupTest() {
+	s.config = defaultTestConfig()
+	s.controller = gomock.NewController(s.T())
+	logger := testlogger.NewTestLogger(s.T(), testlogger.FailOnAnyUnexpectedError)
+
+	nsName := namespace.Name("ns-name")
+	ns, registry := createMockNamespaceCache(s.controller, nsName)
+
+	engine := createTestMatchingEngine(logger, s.controller, s.config, nil, registry)
+	engine.metricsHandler = metricstest.NewCaptureHandler()
+
+	s.physicalTaskQueueKey = defaultTqId()
+	prtn := s.physicalTaskQueueKey.Partition()
+	tqConfig := newTaskQueueConfig(prtn.TaskQueue(), engine.config, nsName)
+	onFatalErr := func(unloadCause) { s.T().Fatal("user data manager called onFatalErr") }
+	udMgr := newUserDataManager(engine.taskManager, engine.matchingRawClient, onFatalErr, nil, nil, prtn, tqConfig, engine.logger, engine.namespaceRegistry)
+
+	prtnMgr, err := newTaskQueuePartitionManager(engine, ns, prtn, tqConfig, engine.logger, nil, metrics.NoopMetricsHandler, udMgr)
+	s.NoError(err)
+	engine.partitions[prtn.Key()] = prtnMgr
+
+	if s.fairness {
+		prtnMgr.config.EnableFairness = true
+	} else if !s.newMatcher {
+		prtnMgr.config.NewMatcher = false
+	}
+
+	s.tqMgr, err = newPhysicalTaskQueueManager(prtnMgr, s.physicalTaskQueueKey)
+	s.NoError(err)
+	prtnMgr.defaultQueueFuture.Set(s.tqMgr, nil)
+}
+
+/*
+TODO(pri): rewrite or delete this test
+func TestReaderSignaling(t *testing.T) {
+	readerNotifications := make(chan struct{}, 1)
+	clearNotifications := func() {
+		for len(readerNotifications) > 0 {
+			<-readerNotifications
+		}
+	}
+	tqMgr := mustCreateTestPhysicalTaskQueueManager(t, gomock.NewController(t))
+
+	// redirect taskReader signals into our local channel
+	s.tqMgr.backlogMgr.taskReader.notifyC = readerNotifications
+
+	s.tqMgr.Start()
+	defer s.tqMgr.Stop(unloadCauseUnspecified)
+
+	// shut down the taskReader so it doesn't steal notifications from us
+	s.tqMgr.backlogMgr.taskReader.gorogrp.Cancel()
+	s.tqMgr.backlogMgr.taskReader.gorogrp.Wait()
+
+	clearNotifications()
+
+	err := s.tqMgr.SpoolTask(&persistencespb.TaskInfo{
+		CreateTime: timestamp.TimePtr(time.Now().UTC()),
+	})
+	require.NoError(t, err)
+	require.Len(t, readerNotifications, 1,
+		"Spool task should signal taskReader")
+
+	clearNotifications()
+	poller, _ := runOneShotPoller(context.Background(), tqMgr)
+	defer poller.Cancel()
+
+	task := newInternalTaskForSyncMatch(&persistencespb.TaskInfo{
+		CreateTime: timestamp.TimePtr(time.Now().UTC()),
+	}, nil)
+	outcome, err := s.tqMgr.TrySyncMatch(context.TODO(), task)
+	require.NoError(t, err)
+	require.Equal(t, syncMatchSuccess, outcome)
+	require.Len(t, readerNotifications, 0,
+		"Sync match should not signal taskReader")
+}
+*/
+
+func makePollMetadata(rps float64) *pollMetadata {
+	return &pollMetadata{taskQueueMetadata: &taskqueuepb.TaskQueueMetadata{
+		MaxTasksPerSecond: &wrapperspb.DoubleValue{
+			Value: rps,
+		},
+	}}
+}
+
+// runOneShotPoller spawns a goroutine to call tqMgr.PollTask on the provided tqMgr.
+// The second return value is a channel of either error or *internalTask.
+func runOneShotPoller(ctx context.Context, tqm physicalTaskQueueManager) (*goro.Handle, chan any) {
+	out := make(chan any, 1)
+	handle := goro.NewHandle(ctx).Go(func(ctx context.Context) error {
+		task, err := tqm.PollTask(ctx, makePollMetadata(rpsInf))
+		if task == nil {
+			out <- err
+			return nil
+		}
+		task.finish(taskFinishResult{err: err, consumedToken: true})
+		out <- task
+		return nil
+	})
+	// tqMgr.PollTask() needs some time to attach the goro started above to the
+	// internal task channel. Sorry for this but it appears unavoidable.
+	time.Sleep(10 * time.Millisecond)
+	return handle, out
+}
+
+func defaultTqId() *PhysicalTaskQueueKey {
+	return newTestUnversionedPhysicalQueueKey(defaultNamespaceId, defaultRootTqID, enumspb.TASK_QUEUE_TYPE_WORKFLOW, 0)
+}
+
+// getTaskManager returns the underlying testTaskManager (which is accessed differently
+// depending on mode)
+func (s *PhysicalTaskQueueManagerTestSuite) getTaskManager() *testTaskManager {
+	if s.fairness {
+		return s.tqMgr.partitionMgr.engine.fairTaskManager.(*testTaskManager)
+	}
+	return s.tqMgr.partitionMgr.engine.taskManager.(*testTaskManager)
+}
+
+// TODO(pri): old matcher cleanup
+func (s *PhysicalTaskQueueManagerTestSuite) TestReaderBacklogAge() {
+	if s.newMatcher {
+		s.T().Skip("not supported by new matcher")
+	}
+
+	// Create queue Manager and set queue state
+	blm := s.tqMgr.backlogMgr.(*backlogManagerImpl)
+	s.NoError(blm.taskWriter.initReadWriteState())
+	s.Equal(int64(0), blm.taskAckManager.getAckLevel())
+	s.Equal(int64(0), blm.taskAckManager.getReadLevel())
+
+	blm.taskReader.taskBuffer <- randomTaskInfoWithAgeTaskID(time.Minute, 1)
+	blm.taskReader.taskBuffer <- randomTaskInfoWithAgeTaskID(10*time.Second, 2)
+	go blm.taskReader.dispatchBufferedTasks()
+
+	s.EventuallyWithT(func(collect *assert.CollectT) {
+		assert.InDelta(collect, time.Minute, blm.taskReader.getBacklogHeadAge(), float64(time.Second))
+	}, time.Second, 10*time.Millisecond)
+
+	_, err := blm.pqMgr.PollTask(context.Background(), makePollMetadata(rpsInf))
+	s.NoError(err)
+
+	s.EventuallyWithT(func(collect *assert.CollectT) {
+		assert.InDelta(collect, 10*time.Second, blm.taskReader.getBacklogHeadAge(), float64(500*time.Millisecond))
+	}, time.Second, 10*time.Millisecond)
+
+	_, err = blm.pqMgr.PollTask(context.Background(), makePollMetadata(rpsInf))
+	s.NoError(err)
+
+	s.EventuallyWithT(func(collect *assert.CollectT) {
+		assert.Equalf(collect, time.Duration(0), blm.taskReader.getBacklogHeadAge(), "backlog age being reset because of no tasks in the buffer")
+	}, time.Second, 10*time.Millisecond)
+}
+
+func randomTaskInfoWithAgeTaskID(age time.Duration, TaskID int64) *persistencespb.AllocatedTaskInfo {
+	rt1 := time.Now().Add(-age)
+	rt2 := rt1.Add(time.Hour)
+
+	return &persistencespb.AllocatedTaskInfo{
+		Data: &persistencespb.TaskInfo{
+			NamespaceId:      uuid.NewString(),
+			WorkflowId:       uuid.NewString(),
+			RunId:            uuid.NewString(),
+			ScheduledEventId: rand.Int63(),
+			CreateTime:       timestamppb.New(rt1),
+			ExpiryTime:       timestamppb.New(rt2),
+		},
+		TaskId: TaskID,
+	}
+}
+
+// TODO(pri): old matcher cleanup
+func (s *PhysicalTaskQueueManagerTestSuite) TestLegacyDescribeTaskQueue() {
+	if s.newMatcher {
+		s.T().Skip("not supported by new matcher")
+	}
+
+	blm := s.tqMgr.backlogMgr.(*backlogManagerImpl)
+	s.NoError(blm.taskWriter.initReadWriteState())
+	s.Equal(int64(0), blm.taskAckManager.getAckLevel())
+	s.Equal(int64(0), blm.taskAckManager.getReadLevel())
+
+	startTaskID := int64(1)
+	taskCount := int64(3)
+	for i := range taskCount {
+		blm.taskAckManager.addTask(startTaskID + i)
+	}
+
+	// Manually increase the backlog counter since it does not get incremented by taskAckManager.addTask
+	// Only doing this for the purpose of this test
+	blm.db.updateBacklogStats(taskCount, time.Time{})
+
+	includeTaskStatus := false
+	descResp := s.tqMgr.LegacyDescribeTaskQueue(includeTaskStatus)
+	s.Empty(descResp.DescResponse.GetPollers())
+	s.Nil(descResp.DescResponse.GetTaskQueueStatus())
+
+	includeTaskStatus = true
+	taskQueueStatus := s.tqMgr.LegacyDescribeTaskQueue(includeTaskStatus).DescResponse.GetTaskQueueStatus()
+	s.NotNil(taskQueueStatus)
+	s.Zero(taskQueueStatus.GetAckLevel())
+	s.Equal(taskCount, taskQueueStatus.GetReadLevel())
+	s.Equal(taskCount, taskQueueStatus.GetBacklogCountHint())
+	idBlock := taskQueueStatus.GetTaskIdBlock()
+	s.Equal(int64(1), idBlock.GetStartId())
+	s.Equal(s.tqMgr.config.RangeSize, idBlock.GetEndId())
+
+	// Add a poller and complete all tasks
+	pollerIdent := pollerIdentity("test-poll")
+	s.tqMgr.pollerHistory.updatePollerInfo(pollerIdent, &pollMetadata{})
+	for i := range taskCount {
+		_, numAcked := blm.taskAckManager.completeTask(startTaskID + i)
+		blm.db.updateBacklogStats(-numAcked, time.Time{})
+	}
+
+	descResp = s.tqMgr.LegacyDescribeTaskQueue(includeTaskStatus)
+	s.Len(descResp.DescResponse.GetPollers(), 1)
+	s.Equal(string(pollerIdent), descResp.DescResponse.Pollers[0].GetIdentity())
+	s.NotEmpty(descResp.DescResponse.Pollers[0].GetLastAccessTime())
+
+	rps := 5.0
+	s.tqMgr.pollerHistory.updatePollerInfo(pollerIdent, makePollMetadata(rps))
+	descResp = s.tqMgr.LegacyDescribeTaskQueue(includeTaskStatus)
+	s.Len(descResp.DescResponse.GetPollers(), 1)
+	s.Equal(string(pollerIdent), descResp.DescResponse.Pollers[0].GetIdentity())
+	s.True(descResp.DescResponse.Pollers[0].GetRatePerSecond() > 4.0 && descResp.DescResponse.Pollers[0].GetRatePerSecond() < 6.0)
+
+	taskQueueStatus = descResp.DescResponse.GetTaskQueueStatus()
+	s.NotNil(taskQueueStatus)
+	s.Equal(taskCount, taskQueueStatus.GetAckLevel())
+	s.Zero(taskQueueStatus.GetBacklogCountHint())
+}
+
+func (s *PhysicalTaskQueueManagerTestSuite) TestCheckIdleTaskQueue() {
+	// Idle
+	s.tqMgr.Start()
+	time.Sleep(50 * time.Millisecond) // nolint:forbidigo
+	s.Equal(common.DaemonStatusStarted, atomic.LoadInt32(&s.tqMgr.status))
+	s.tqMgr.Stop(unloadCauseShuttingDown)
+	s.Equal(common.DaemonStatusStopped, atomic.LoadInt32(&s.tqMgr.status))
+
+	s.SetupTest()
+
+	// Active poll-er
+	s.tqMgr.Start()
+	s.tqMgr.pollerHistory.updatePollerInfo("test-poll", &pollMetadata{})
+	s.Len(s.tqMgr.GetAllPollerInfo(), 1)
+	time.Sleep(50 * time.Millisecond) // nolint:forbidigo
+	s.Equal(common.DaemonStatusStarted, atomic.LoadInt32(&s.tqMgr.status))
+	s.tqMgr.Stop(unloadCauseUnspecified)
+	s.Equal(common.DaemonStatusStopped, atomic.LoadInt32(&s.tqMgr.status))
+
+	s.SetupTest()
+
+	// Active adding task
+	s.tqMgr.Start()
+	s.Empty(s.tqMgr.GetAllPollerInfo())
+	time.Sleep(50 * time.Millisecond) // nolint:forbidigo
+	s.Equal(common.DaemonStatusStarted, atomic.LoadInt32(&s.tqMgr.status))
+	s.tqMgr.Stop(unloadCauseUnspecified)
+	s.Equal(common.DaemonStatusStopped, atomic.LoadInt32(&s.tqMgr.status))
+}
+
+func (s *PhysicalTaskQueueManagerTestSuite) TestAddTaskStandby() {
+	ns := namespace.NewGlobalNamespaceForTest(
+		&persistencespb.NamespaceInfo{},
+		&persistencespb.NamespaceConfig{},
+		&persistencespb.NamespaceReplicationConfig{
+			ActiveClusterName: cluster.TestAlternativeClusterName,
+		},
+		cluster.TestAlternativeClusterInitialFailoverVersion,
+	)
+
+	// we need to override the mockNamespaceCache to return a passive namespace
+	mockNamespaceCache := namespace.NewMockRegistry(s.controller)
+	mockNamespaceCache.EXPECT().GetNamespaceByID(gomock.Any()).Return(ns, nil).AnyTimes()
+	mockNamespaceCache.EXPECT().GetNamespaceName(gomock.Any()).Return(ns.Name(), nil).AnyTimes()
+	s.tqMgr.namespaceRegistry = mockNamespaceCache
+
+	s.tqMgr.Start()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	err := s.tqMgr.WaitUntilInitialized(ctx)
+	s.Require().NoError(err)
+	defer s.tqMgr.Stop(unloadCauseShuttingDown)
+	cancel()
+
+	// stop taskWriter so that we can check if there's any call to it
+	// otherwise the task persist process is async and hard to test
+	s.tqMgr.tqCtxCancel()
+
+	err = s.tqMgr.SpoolTask(&persistencespb.TaskInfo{
+		CreateTime: timestamp.TimePtr(time.Now().UTC()),
+	})
+	s.Equal(errShutdown, err) // task writer was stopped above
+}
+
+func (s *PhysicalTaskQueueManagerTestSuite) TestTQMDoesFinalUpdateOnIdleUnload() {
+	s.config.MaxTaskQueueIdleTime = dynamicconfig.GetDurationPropertyFnFilteredByTaskQueue(1 * time.Second)
+	s.tqMgr.Start()
+	defer s.tqMgr.Stop(unloadCauseShuttingDown)
+
+	tm := s.getTaskManager()
+	s.EventuallyWithT(func(collect *assert.CollectT) {
+		// will unload due to idleness
+		require.Equal(collect, 1, tm.getUpdateCount(s.physicalTaskQueueKey))
+	}, 5*time.Second, 100*time.Millisecond)
+}
+
+func (s *PhysicalTaskQueueManagerTestSuite) TestTQMDoesNotDoFinalUpdateOnOwnershipLost() {
+	// TODO: use mocks instead of testTaskManager so we can do synchronization better instead of sleeps
+	s.config.UpdateAckInterval = dynamicconfig.GetDurationPropertyFnFilteredByTaskQueue(100 * time.Millisecond)
+	s.tqMgr.Start()
+
+	// wait for goroutines to start and to acquire rangeid lock
+	time.Sleep(10 * time.Millisecond) // nolint:forbidigo
+
+	tm := s.getTaskManager()
+
+	// Fresh fair/new-matcher queues drain the other backlog on startup. This
+	// completes immediately (nothing to drain) and persists otherHasTasks=false.
+	// Wait for it to settle so it doesn't race with the assertions below, then
+	// capture the resulting write count as our baseline.
+	await.RequireTrue(s.T(), func() bool {
+		return s.tqMgr.getDrainBacklogMgr() == nil
+	}, 5*time.Second, 20*time.Millisecond)
+	baseline := tm.getUpdateCount(s.physicalTaskQueueKey)
+
+	// simulate stolen lock
+	ptm := tm.getQueueDataByKey(s.physicalTaskQueueKey)
+	ptm.Lock()
+	ptm.rangeID++
+	ptm.Unlock()
+
+	// change something to ensure it does the periodic write
+	s.tqMgr.backlogMgr.getDB().updateAckLevelAndBacklogStats(0, 123456, 10, time.Time{})
+
+	// on the next periodic write, it'll fail due to conflict and unload the task queue
+	s.Eventually(func() bool {
+		return s.tqMgr.tqCtx.Err() != nil
+	}, 5*time.Second, 20*time.Millisecond)
+
+	// no additional updates beyond the failed periodic write (which counts as "1");
+	// in particular, no final update is done during shutdown after losing ownership.
+	s.Equal(baseline+1, tm.getUpdateCount(s.physicalTaskQueueKey))
+}
+
+func (s *PhysicalTaskQueueManagerTestSuite) TestTQMInterruptsPollOnClose() {
+	s.tqMgr.Start()
+
+	pollStart := time.Now()
+	pollCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, pollCh := runOneShotPoller(pollCtx, s.tqMgr)
+
+	s.tqMgr.Stop(unloadCauseUnspecified) // should interrupt poller
+
+	<-pollCh
+	s.Less(time.Since(pollStart), 4*time.Second)
+}
+
+func (s *PhysicalTaskQueueManagerTestSuite) TestPollScalingUpOnBacklog() {
+	rl := quotas.NewMockRateLimiter(s.controller)
+	rl.EXPECT().AllowN(gomock.Any(), gomock.Any()).Return(true).AnyTimes()
+	s.tqMgr.pollerScalingRateLimiter = rl
+
+	fakeStats := &taskqueuepb.TaskQueueStats{
+		ApproximateBacklogCount: 100,
+		ApproximateBacklogAge:   durationpb.New(1 * time.Minute),
+	}
+
+	decision := s.tqMgr.makePollerScalingDecisionImpl(time.Now(), func() *taskqueuepb.TaskQueueStats { return fakeStats })
+	s.NotNil(decision)
+	s.GreaterOrEqual(decision.PollRequestDeltaSuggestion, int32(1))
+}
+
+func (s *PhysicalTaskQueueManagerTestSuite) TestPollScalingUpAddRateExceedsDispatchRate() {
+	rl := quotas.NewMockRateLimiter(s.controller)
+	rl.EXPECT().AllowN(gomock.Any(), gomock.Any()).Return(true).AnyTimes()
+	s.tqMgr.pollerScalingRateLimiter = rl
+
+	fakeStats := &taskqueuepb.TaskQueueStats{
+		TasksAddRate:      100,
+		TasksDispatchRate: 10,
+	}
+
+	decision := s.tqMgr.makePollerScalingDecisionImpl(time.Now(), func() *taskqueuepb.TaskQueueStats { return fakeStats })
+	s.NotNil(decision)
+	s.GreaterOrEqual(decision.PollRequestDeltaSuggestion, int32(1))
+}
+
+func (s *PhysicalTaskQueueManagerTestSuite) TestPollScalingUpUsesDefaultRatioThreshold() {
+	// The default add-to-dispatch ratio threshold is 1.2, so a ratio just below it should not
+	// scale up while a ratio just above it should.
+	rl := quotas.NewMockRateLimiter(s.controller)
+	rl.EXPECT().AllowN(gomock.Any(), gomock.Any()).Return(true).AnyTimes()
+	s.tqMgr.pollerScalingRateLimiter = rl
+
+	// 110/100 = 1.1, below the 1.2 default.
+	belowThreshold := &taskqueuepb.TaskQueueStats{TasksAddRate: 110, TasksDispatchRate: 100}
+	decision := s.tqMgr.makePollerScalingDecisionImpl(time.Now(), func() *taskqueuepb.TaskQueueStats { return belowThreshold })
+	s.Nil(decision)
+
+	// 130/100 = 1.3, above the 1.2 default.
+	aboveThreshold := &taskqueuepb.TaskQueueStats{TasksAddRate: 130, TasksDispatchRate: 100}
+	decision = s.tqMgr.makePollerScalingDecisionImpl(time.Now(), func() *taskqueuepb.TaskQueueStats { return aboveThreshold })
+	s.NotNil(decision)
+	s.GreaterOrEqual(decision.PollRequestDeltaSuggestion, int32(1))
+}
+
+func (s *PhysicalTaskQueueManagerTestSuite) TestPollScalingUpRatioThresholdIsConfigurable() {
+	rl := quotas.NewMockRateLimiter(s.controller)
+	rl.EXPECT().AllowN(gomock.Any(), gomock.Any()).Return(true).AnyTimes()
+	s.tqMgr.pollerScalingRateLimiter = rl
+
+	// 100/10 = 10, which would scale up under the default 1.2 threshold. Raising the threshold
+	// above the actual ratio should suppress the scale-up.
+	highRatio := &taskqueuepb.TaskQueueStats{TasksAddRate: 100, TasksDispatchRate: 10}
+	s.tqMgr.partitionMgr.config.PollerScalingTaskAddToDispatchRatio = func() float64 { return 20 }
+	decision := s.tqMgr.makePollerScalingDecisionImpl(time.Now(), func() *taskqueuepb.TaskQueueStats { return highRatio })
+	s.Nil(decision)
+
+	// 110/100 = 1.1, which would not scale up under the default 1.2 threshold. Lowering the
+	// threshold below the actual ratio should trigger a scale-up.
+	lowRatio := &taskqueuepb.TaskQueueStats{TasksAddRate: 110, TasksDispatchRate: 100}
+	s.tqMgr.partitionMgr.config.PollerScalingTaskAddToDispatchRatio = func() float64 { return 1.0 }
+	decision = s.tqMgr.makePollerScalingDecisionImpl(time.Now(), func() *taskqueuepb.TaskQueueStats { return lowRatio })
+	s.NotNil(decision)
+	s.GreaterOrEqual(decision.PollRequestDeltaSuggestion, int32(1))
+}
+
+func (s *PhysicalTaskQueueManagerTestSuite) TestPollScalingNoChangeOnNoBacklogFastMatch() {
+	fakeStats := &taskqueuepb.TaskQueueStats{
+		ApproximateBacklogCount: 0,
+		ApproximateBacklogAge:   durationpb.New(0),
+	}
+	decision := s.tqMgr.makePollerScalingDecisionImpl(time.Now(), func() *taskqueuepb.TaskQueueStats { return fakeStats })
+	s.Nil(decision)
+}
+
+func (s *PhysicalTaskQueueManagerTestSuite) TestPollScalingNonRootPartition() {
+	// Non-root partitions only get to emit decisions on high backlog
+	f, err := tqid.NewTaskQueueFamily(namespaceID, taskQueueName)
+	s.NoError(err)
+	partition := f.TaskQueue(enumspb.TASK_QUEUE_TYPE_WORKFLOW).NormalPartition(1)
+	s.tqMgr.partitionMgr.partition = partition
+	// Also disable rate limit to ensure that's not why nil is returned here
+	rl := quotas.NewMockRateLimiter(s.controller)
+	rl.EXPECT().AllowN(gomock.Any(), gomock.Any()).Return(true).AnyTimes()
+	s.tqMgr.pollerScalingRateLimiter = rl
+
+	fakeStats := &taskqueuepb.TaskQueueStats{
+		ApproximateBacklogCount: 100,
+		ApproximateBacklogAge:   durationpb.New(1 * time.Minute),
+	}
+	decision := s.tqMgr.makePollerScalingDecisionImpl(time.Now(), func() *taskqueuepb.TaskQueueStats { return fakeStats })
+	s.NotNil(decision)
+	s.GreaterOrEqual(decision.PollRequestDeltaSuggestion, int32(1))
+
+	fakeStats.ApproximateBacklogCount = 0
+	decision = s.tqMgr.makePollerScalingDecisionImpl(time.Now(), func() *taskqueuepb.TaskQueueStats { return fakeStats })
+	s.Nil(decision)
+}
+
+func (s *PhysicalTaskQueueManagerTestSuite) TestPollScalingStickyQueue() {
+	// Sticky queues aren't considered root, but unlike non-root normal partitions they have a
+	// complete view of their data, so they should still emit scaling decisions beyond backlog.
+	f, err := tqid.NewTaskQueueFamily(namespaceID, taskQueueName)
+	s.Require().NoError(err)
+	stickyPartition := f.TaskQueue(enumspb.TASK_QUEUE_TYPE_WORKFLOW).StickyPartition("sticky-name")
+	s.False(stickyPartition.IsRoot())
+	s.tqMgr.queue = UnversionedQueueKey(stickyPartition)
+	// Disable rate limit to ensure that's not why a decision is returned here.
+	rl := quotas.NewMockRateLimiter(s.controller)
+	rl.EXPECT().AllowN(gomock.Any(), gomock.Any()).Return(true).AnyTimes()
+	s.tqMgr.pollerScalingRateLimiter = rl
+
+	// No backlog, but add rate exceeds dispatch rate: a non-root normal partition would return nil
+	// here, but a sticky queue should still suggest a scale-up.
+	fakeStats := &taskqueuepb.TaskQueueStats{
+		TasksAddRate:      100,
+		TasksDispatchRate: 10,
+	}
+	decision := s.tqMgr.makePollerScalingDecisionImpl(time.Now(), func() *taskqueuepb.TaskQueueStats { return fakeStats })
+	s.NotNil(decision)
+	s.GreaterOrEqual(decision.PollRequestDeltaSuggestion, int32(1))
+}
+
+func (s *PhysicalTaskQueueManagerTestSuite) TestPollScalingDownOnLongSyncMatch() {
+	fakeStats := &taskqueuepb.TaskQueueStats{
+		ApproximateBacklogCount: 0,
+	}
+	decision := s.tqMgr.makePollerScalingDecisionImpl(time.Now().Add(-2*time.Second), func() *taskqueuepb.TaskQueueStats { return fakeStats })
+	s.LessOrEqual(decision.PollRequestDeltaSuggestion, int32(-1))
+}
+
+func (s *PhysicalTaskQueueManagerTestSuite) TestPollScalingDecisionsAreRateLimited() {
+	rl := quotas.NewMockRateLimiter(s.controller)
+	rl.EXPECT().AllowN(gomock.Any(), gomock.Any()).Return(true).Times(1)
+	rl.EXPECT().AllowN(gomock.Any(), gomock.Any()).Return(false).Times(1)
+	s.tqMgr.pollerScalingRateLimiter = rl
+
+	fakeStats := &taskqueuepb.TaskQueueStats{
+		ApproximateBacklogCount: 100,
+		ApproximateBacklogAge:   durationpb.New(1 * time.Minute),
+	}
+	decision := s.tqMgr.makePollerScalingDecisionImpl(time.Now(), func() *taskqueuepb.TaskQueueStats { return fakeStats })
+	s.GreaterOrEqual(decision.PollRequestDeltaSuggestion, int32(1))
+
+	decision = s.tqMgr.makePollerScalingDecisionImpl(time.Now(), func() *taskqueuepb.TaskQueueStats { return fakeStats })
+	s.Nil(decision)
+}
+
+// enablePollerScaleDecisionMetrics swaps in a capturing metrics handler and turns on the opt-in
+// poller_scale_decision metric for the manager under test, returning the handler for assertions.
+func (s *PhysicalTaskQueueManagerTestSuite) enablePollerScaleDecisionMetrics() *metricstest.CaptureHandler {
+	handler := metricstest.NewCaptureHandler()
+	s.tqMgr.metricsHandler = handler
+	s.tqMgr.partitionMgr.config.EnablePollerScalingDecisionMetrics = func() bool { return true }
+	return handler
+}
+
+// assertPollerScaleDecision asserts that exactly one poller_scale_decision metric was captured
+// with the expected decision (direction) and reason tags.
+func (s *PhysicalTaskQueueManagerTestSuite) assertPollerScaleDecision(capture *metricstest.Capture, wantDecision string, wantReason metrics.ReasonString) {
+	recordings := capture.Snapshot()[metrics.PollerScaleDecisionCounter.Name()]
+	s.Require().Len(recordings, 1)
+	s.Equal(int64(1), recordings[0].Value)
+	s.Equal(wantDecision, recordings[0].Tags[metrics.PollerScaleDecisionTag(wantDecision).Key])
+	s.Equal(string(wantReason), recordings[0].Tags[metrics.ReasonTag(wantReason).Key])
+}
+
+func (s *PhysicalTaskQueueManagerTestSuite) TestPollScalingDecisionMetricScaleDownIdle() {
+	handler := s.enablePollerScaleDecisionMetrics()
+	capture := handler.StartCapture()
+	defer handler.StopCapture(capture)
+
+	fakeStats := &taskqueuepb.TaskQueueStats{ApproximateBacklogCount: 0}
+	s.tqMgr.makePollerScalingDecisionImpl(time.Now().Add(-2*time.Second), func() *taskqueuepb.TaskQueueStats { return fakeStats })
+	s.assertPollerScaleDecision(capture, metrics.PollerScaleDecisionDown, metrics.PollerScaleReasonIdle)
+}
+
+func (s *PhysicalTaskQueueManagerTestSuite) TestPollScalingDecisionMetricScaleUpBacklog() {
+	rl := quotas.NewMockRateLimiter(s.controller)
+	rl.EXPECT().AllowN(gomock.Any(), gomock.Any()).Return(true).AnyTimes()
+	s.tqMgr.pollerScalingRateLimiter = rl
+	handler := s.enablePollerScaleDecisionMetrics()
+	capture := handler.StartCapture()
+	defer handler.StopCapture(capture)
+
+	fakeStats := &taskqueuepb.TaskQueueStats{
+		ApproximateBacklogCount: 100,
+		ApproximateBacklogAge:   durationpb.New(1 * time.Minute),
+	}
+	s.tqMgr.makePollerScalingDecisionImpl(time.Now(), func() *taskqueuepb.TaskQueueStats { return fakeStats })
+	s.assertPollerScaleDecision(capture, metrics.PollerScaleDecisionUp, metrics.PollerScaleReasonBacklog)
+}
+
+func (s *PhysicalTaskQueueManagerTestSuite) TestPollScalingDecisionMetricScaleUpTaskRate() {
+	rl := quotas.NewMockRateLimiter(s.controller)
+	rl.EXPECT().AllowN(gomock.Any(), gomock.Any()).Return(true).AnyTimes()
+	s.tqMgr.pollerScalingRateLimiter = rl
+	handler := s.enablePollerScaleDecisionMetrics()
+	capture := handler.StartCapture()
+	defer handler.StopCapture(capture)
+
+	fakeStats := &taskqueuepb.TaskQueueStats{
+		TasksAddRate:      100,
+		TasksDispatchRate: 10,
+	}
+	s.tqMgr.makePollerScalingDecisionImpl(time.Now(), func() *taskqueuepb.TaskQueueStats { return fakeStats })
+	s.assertPollerScaleDecision(capture, metrics.PollerScaleDecisionUp, metrics.PollerScaleReasonTaskRate)
+}
+
+func (s *PhysicalTaskQueueManagerTestSuite) TestPollScalingDecisionMetricHoldRateLimited() {
+	rl := quotas.NewMockRateLimiter(s.controller)
+	rl.EXPECT().AllowN(gomock.Any(), gomock.Any()).Return(false).AnyTimes()
+	s.tqMgr.pollerScalingRateLimiter = rl
+	handler := s.enablePollerScaleDecisionMetrics()
+	capture := handler.StartCapture()
+	defer handler.StopCapture(capture)
+
+	fakeStats := &taskqueuepb.TaskQueueStats{
+		ApproximateBacklogCount: 100,
+		ApproximateBacklogAge:   durationpb.New(1 * time.Minute),
+	}
+	s.tqMgr.makePollerScalingDecisionImpl(time.Now(), func() *taskqueuepb.TaskQueueStats { return fakeStats })
+	s.assertPollerScaleDecision(capture, metrics.PollerScaleDecisionHold, metrics.PollerScaleReasonRateLimited)
+}
+
+func (s *PhysicalTaskQueueManagerTestSuite) TestPollScalingDecisionMetricNoSignalNotEmitted() {
+	rl := quotas.NewMockRateLimiter(s.controller)
+	rl.EXPECT().AllowN(gomock.Any(), gomock.Any()).Return(true).AnyTimes()
+	s.tqMgr.pollerScalingRateLimiter = rl
+	handler := s.enablePollerScaleDecisionMetrics()
+	capture := handler.StartCapture()
+	defer handler.StopCapture(capture)
+
+	// No backlog and add rate does not exceed dispatch rate: delta stays 0, so no decision is
+	// issued and nothing should be emitted even with the metric enabled.
+	fakeStats := &taskqueuepb.TaskQueueStats{
+		ApproximateBacklogCount: 0,
+		TasksAddRate:            10,
+		TasksDispatchRate:       100,
+	}
+	decision := s.tqMgr.makePollerScalingDecisionImpl(time.Now(), func() *taskqueuepb.TaskQueueStats { return fakeStats })
+	s.Nil(decision)
+	s.Empty(capture.Snapshot()[metrics.PollerScaleDecisionCounter.Name()])
+}
+
+func (s *PhysicalTaskQueueManagerTestSuite) TestPollScalingDecisionMetricDisabledByDefault() {
+	// The opt-in config defaults to false, so no metric should be emitted.
+	handler := metricstest.NewCaptureHandler()
+	s.tqMgr.metricsHandler = handler
+	capture := handler.StartCapture()
+	defer handler.StopCapture(capture)
+
+	fakeStats := &taskqueuepb.TaskQueueStats{ApproximateBacklogCount: 0}
+	s.tqMgr.makePollerScalingDecisionImpl(time.Now().Add(-2*time.Second), func() *taskqueuepb.TaskQueueStats { return fakeStats })
+	s.Empty(capture.Snapshot()[metrics.PollerScaleDecisionCounter.Name()])
+}
+
+// TestDrainCompletionNoReloadDraining tests that after drain completes:
+// 1. OtherHasTasks is set to false in persisted metadata
+// 2. On reload, no draining is set up and no persistence calls are made to the migration table
+func TestDrainCompletionNoReloadDraining(t *testing.T) {
+	t.Parallel()
+
+	controller := gomock.NewController(t)
+	logger := testlogger.NewTestLogger(t, testlogger.FailOnAnyUnexpectedError)
+
+	config := defaultTestConfig()
+	config.UpdateAckInterval = dynamicconfig.GetDurationPropertyFnFilteredByTaskQueue(50 * time.Millisecond)
+
+	nsName := namespace.Name("ns-name")
+	ns, registry := createMockNamespaceCache(controller, nsName)
+
+	engine := createTestMatchingEngine(logger, controller, config, nil, registry)
+	engine.metricsHandler = metricstest.NewCaptureHandler()
+
+	// Get the test task managers
+	priTm := engine.taskManager.(*testTaskManager)
+	fairTm := engine.fairTaskManager.(*testTaskManager)
+
+	physicalTaskQueueKey := defaultTqId()
+	prtn := physicalTaskQueueKey.Partition()
+	tqConfig := newTaskQueueConfig(prtn.TaskQueue(), engine.config, nsName)
+	onFatalErr := func(unloadCause) { t.Fatal("user data manager called onFatalErr") }
+	udMgr := newUserDataManager(engine.taskManager, engine.matchingRawClient, onFatalErr, nil, nil, prtn, tqConfig, engine.logger, engine.namespaceRegistry)
+
+	prtnMgr, err := newTaskQueuePartitionManager(engine, ns, prtn, tqConfig, engine.logger, nil, metrics.NoopMetricsHandler, udMgr)
+	require.NoError(t, err)
+	engine.partitions[prtn.Key()] = prtnMgr
+
+	prtnMgr.config.NewMatcher = true
+	prtnMgr.config.EnableFairness = true
+
+	tqMgr, err := newPhysicalTaskQueueManager(prtnMgr, physicalTaskQueueKey)
+	require.NoError(t, err)
+	prtnMgr.defaultQueueFuture.Set(tqMgr, nil)
+
+	tqMgr.Start()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	err = tqMgr.WaitUntilInitialized(ctx)
+	cancel()
+	require.NoError(t, err)
+
+	// grab referencs to these to peek inside
+	priQueueData := priTm.getQueueDataByKey(physicalTaskQueueKey)
+	fairQueueData := fairTm.getQueueDataByKey(physicalTaskQueueKey)
+
+	// wait for both to be loaded
+	require.Eventually(t, func() bool {
+		pri, fair := priQueueData.persistenceStats(), fairQueueData.persistenceStats()
+		return (pri.updateCount > 0 || pri.createCount > 0) && (fair.updateCount > 0 || fair.createCount > 0)
+	}, 2*time.Second, 10*time.Millisecond, "both tables should be loaded")
+
+	// since the pri table is empty, drain should complete quickly.
+	// wait for drain completion (drainbacklogmgr becomes nil) and
+	// otherhastasks is false in persistence
+	require.Eventually(t, func() bool {
+		fairQueueData.Lock()
+		otherHasTasks := fairQueueData.info.OtherHasTasks
+		fairQueueData.Unlock()
+		return tqMgr.getDrainBacklogMgr() == nil && !otherHasTasks
+	}, 5*time.Second, 50*time.Millisecond, "drain should complete")
+
+	// unload
+	prtnMgr.Stop(unloadCauseUnspecified)
+
+	// record current counts
+	prevPriStats, prevFairStats := priQueueData.persistenceStats(), fairQueueData.persistenceStats()
+
+	// create a new manager (reload)
+	prtnMgr2, err := newTaskQueuePartitionManager(engine, ns, prtn, tqConfig, engine.logger, nil, metrics.NoopMetricsHandler, udMgr)
+	require.NoError(t, err)
+	engine.partitions[prtn.Key()] = prtnMgr2
+
+	prtnMgr2.config.NewMatcher = true
+	prtnMgr2.config.EnableFairness = true
+
+	tqMgr2, err := newPhysicalTaskQueueManager(prtnMgr2, physicalTaskQueueKey)
+	require.NoError(t, err)
+	prtnMgr2.defaultQueueFuture.Set(tqMgr2, nil)
+
+	tqMgr2.Start()
+	defer tqMgr2.Stop(unloadCauseShuttingDown)
+
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	err = tqMgr2.WaitUntilInitialized(ctx)
+	cancel()
+	require.NoError(t, err)
+
+	// wait for fair queue to be updated on reload
+	require.Eventually(t, func() bool {
+		return fairQueueData.persistenceStats().updateCount > prevFairStats.updateCount
+	}, 2*time.Second, 10*time.Millisecond, "fair table should be updated on reload")
+
+	// verify no draining is set up on reload
+	require.Nil(t, tqMgr2.getDrainBacklogMgr(), "draining should not be set up after reload")
+
+	// verify no new persistence calls on pri queue
+	assert.Equal(t, prevPriStats.updateCount, priQueueData.persistenceStats().updateCount,
+		"no new UpdateTaskQueue calls should be made to drained table after reload")
+}

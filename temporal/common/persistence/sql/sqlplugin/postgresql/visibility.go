@@ -1,0 +1,216 @@
+package postgresql
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"strings"
+	"time"
+
+	"go.temporal.io/server/common/persistence/sql/sqlplugin"
+)
+
+var (
+	templateInsertWorkflowExecution = fmt.Sprintf(
+		`INSERT INTO executions_visibility (%s)
+		VALUES (%s)
+		ON CONFLICT (namespace_id, run_id) DO NOTHING`,
+		strings.Join(sqlplugin.DbFields, ", "),
+		sqlplugin.BuildNamedPlaceholder(sqlplugin.DbFields...),
+	)
+
+	templateUpsertWorkflowExecution = fmt.Sprintf(
+		`INSERT INTO executions_visibility (%s)
+		VALUES (%s)
+		%s`,
+		strings.Join(sqlplugin.DbFields, ", "),
+		sqlplugin.BuildNamedPlaceholder(sqlplugin.DbFields...),
+		buildOnDuplicateKeyUpdate(sqlplugin.DbFields...),
+	)
+
+	templateDeleteWorkflowExecution_v12 = `
+		DELETE FROM executions_visibility
+		WHERE namespace_id = :namespace_id AND run_id = :run_id`
+
+	templateGetWorkflowExecution_v12 = fmt.Sprintf(
+		`SELECT %s FROM executions_visibility
+		WHERE namespace_id = $1 AND run_id = $2`,
+		strings.Join(sqlplugin.DbFields, ", "),
+	)
+)
+
+func buildOnDuplicateKeyUpdate(fields ...string) string {
+	items := make([]string, len(fields))
+	for i, field := range fields {
+		items[i] = fmt.Sprintf("%s = excluded.%s", field, field)
+	}
+	return fmt.Sprintf(
+		// The WHERE clause ensures that no update occurs if the version is behind the saved version.
+		"ON CONFLICT (namespace_id, run_id) DO UPDATE SET %s WHERE executions_visibility.%s < EXCLUDED.%s",
+		strings.Join(items, ", "), sqlplugin.VersionColumnName, sqlplugin.VersionColumnName,
+	)
+}
+
+// InsertIntoVisibility inserts a row into visibility table. If an row already exist,
+// its left as such and no update will be made
+func (pdb *db) InsertIntoVisibility(
+	ctx context.Context,
+	row *sqlplugin.VisibilityRow,
+) (sql.Result, error) {
+	finalRow := pdb.prepareRowForDB(row)
+	return pdb.NamedExecContext(ctx, templateInsertWorkflowExecution, finalRow)
+}
+
+// ReplaceIntoVisibility replaces an existing row if it exist or creates a new row in visibility table
+func (pdb *db) ReplaceIntoVisibility(
+	ctx context.Context,
+	row *sqlplugin.VisibilityRow,
+) (sql.Result, error) {
+	finalRow := pdb.prepareRowForDB(row)
+	return pdb.NamedExecContext(ctx, templateUpsertWorkflowExecution, finalRow)
+}
+
+// DeleteFromVisibility deletes a row from visibility table if it exist
+func (pdb *db) DeleteFromVisibility(
+	ctx context.Context,
+	filter sqlplugin.VisibilityDeleteFilter,
+) (sql.Result, error) {
+	return pdb.NamedExecContext(ctx, templateDeleteWorkflowExecution_v12, filter)
+}
+
+// SelectFromVisibility reads one or more rows from visibility table
+func (pdb *db) SelectFromVisibility(
+	ctx context.Context,
+	filter sqlplugin.VisibilitySelectFilter,
+) ([]sqlplugin.VisibilityRow, error) {
+	if len(filter.Query) == 0 {
+		// backward compatibility for existing tests
+		err := sqlplugin.GenerateSelectQuery(&filter, pdb.converter.ToPostgreSQLDateTime)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Rebind will replace default placeholder `?` with the right placeholder for PostgreSQL.
+	db, err := pdb.handle.DB()
+	if err != nil {
+		return nil, err
+	}
+	filter.Query = db.Rebind(filter.Query)
+	var rows []sqlplugin.VisibilityRow
+	err = db.SelectContext(ctx, &rows, filter.Query, filter.QueryArgs...)
+	if err != nil {
+		return nil, err
+	}
+	for i := range rows {
+		err = pdb.processRowFromDB(&rows[i])
+		if err != nil {
+			return nil, err
+		}
+	}
+	return rows, nil
+}
+
+// GetFromVisibility reads one row from visibility table
+func (pdb *db) GetFromVisibility(
+	ctx context.Context,
+	filter sqlplugin.VisibilityGetFilter,
+) (*sqlplugin.VisibilityRow, error) {
+	var row sqlplugin.VisibilityRow
+	if err := pdb.GetContext(
+		ctx,
+		&row,
+		templateGetWorkflowExecution_v12,
+		filter.NamespaceID,
+		filter.RunID,
+	); err != nil {
+		return nil, err
+	}
+	if err := pdb.processRowFromDB(&row); err != nil {
+		return nil, err
+	}
+	return &row, nil
+}
+
+func (pdb *db) CountFromVisibility(
+	ctx context.Context,
+	filter sqlplugin.VisibilitySelectFilter,
+) (int64, error) {
+	var count int64
+	filter.Query = pdb.Rebind(filter.Query)
+	err := pdb.GetContext(ctx, &count, filter.Query, filter.QueryArgs...)
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func (pdb *db) CountGroupByFromVisibility(
+	ctx context.Context,
+	filter sqlplugin.VisibilitySelectFilter,
+) ([]sqlplugin.VisibilityCountRow, error) {
+	filter.Query = pdb.Rebind(filter.Query)
+	rows, err := pdb.QueryContext(ctx, filter.Query, filter.QueryArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return sqlplugin.ParseCountGroupByRows(rows, filter.GroupBy)
+}
+
+func (pdb *db) prepareRowForDB(row *sqlplugin.VisibilityRow) *sqlplugin.VisibilityRow {
+	if row == nil {
+		return nil
+	}
+	finalRow := *row
+	finalRow.StartTime = pdb.converter.ToPostgreSQLDateTime(finalRow.StartTime)
+	finalRow.ExecutionTime = pdb.converter.ToPostgreSQLDateTime(finalRow.ExecutionTime)
+	if finalRow.CloseTime != nil {
+		*finalRow.CloseTime = pdb.converter.ToPostgreSQLDateTime(*finalRow.CloseTime)
+	}
+	if finalRow.SearchAttributes != nil {
+		saMap := *finalRow.SearchAttributes
+		for name, value := range saMap {
+			if dt, ok := value.(time.Time); ok {
+				saMap[name] = dt.Format(time.RFC3339Nano)
+			}
+		}
+	}
+	return &finalRow
+}
+
+func (pdb *db) processRowFromDB(row *sqlplugin.VisibilityRow) error {
+	if row == nil {
+		return nil
+	}
+	row.StartTime = pdb.converter.FromPostgreSQLDateTime(row.StartTime)
+	row.ExecutionTime = pdb.converter.FromPostgreSQLDateTime(row.ExecutionTime)
+	if row.CloseTime != nil {
+		closeTime := pdb.converter.FromPostgreSQLDateTime(*row.CloseTime)
+		row.CloseTime = &closeTime
+	}
+	if row.SearchAttributes != nil {
+		for saName, saValue := range *row.SearchAttributes {
+			switch typedSaValue := saValue.(type) {
+			case []any:
+				// the only valid type is slice of strings
+				strSlice := make([]string, len(typedSaValue))
+				for i, item := range typedSaValue {
+					switch v := item.(type) {
+					case string:
+						strSlice[i] = v
+					default:
+						return fmt.Errorf("%w: %T (expected string)", sqlplugin.ErrInvalidKeywordListDataType, v)
+					}
+				}
+				(*row.SearchAttributes)[saName] = strSlice
+			default:
+				// no-op
+			}
+		}
+	}
+	// need to trim the run ID, or otherwise the returned value will
+	// come with lots of trailing spaces, probably due to the CHAR(64) type
+	row.RunID = strings.TrimSpace(row.RunID)
+	return nil
+}

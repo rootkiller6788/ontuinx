@@ -1,0 +1,22 @@
+{
+  "scenario": "budget_depleted_success",
+  "description": "All criteria met but max_attempts reached — task IS successful",
+  "exit_reason": "budget_limit",
+  "contract": {
+    "objective": "Optimize KVDB search",
+    "effect_class": "staged",
+    "criteria": [
+      {"id": "c-tests", "name": "tests", "kind": "test_pass", "is_blocking": true}
+    ],
+    "approval_mode": "never"
+  },
+  "evidence": [
+    {"criterion_id": "c-tests", "kind": "test_output", "payload": {"passed": true, "total": 9, "passed": true, "passed_count": 9}}
+  ],
+  "expected": {
+    "task_outcome": "success",
+    "budget_outcome": "depleted",
+    "lifecycle_state": "committed",
+    "settlement": "commit"
+  }
+}

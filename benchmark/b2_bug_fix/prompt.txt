@@ -1,0 +1,2 @@
+Fix the bugs in kv_config.c so the library correctly parses simple key=value config files.
+Run the test suite to verify your fixes. All tests must pass and the code must be ASan-clean.

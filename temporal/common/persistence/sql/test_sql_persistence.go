@@ -1,0 +1,231 @@
+package sql
+
+import (
+	"fmt"
+	"os"
+	"path"
+	"strings"
+	"time"
+
+	"go.temporal.io/server/common/backoff"
+	"go.temporal.io/server/common/config"
+	"go.temporal.io/server/common/dynamicconfig"
+	"go.temporal.io/server/common/log"
+	"go.temporal.io/server/common/log/tag"
+	"go.temporal.io/server/common/metrics"
+	p "go.temporal.io/server/common/persistence"
+	"go.temporal.io/server/common/persistence/sql/sqlplugin"
+	"go.temporal.io/server/common/primitives"
+	"go.temporal.io/server/common/resolver"
+	"go.temporal.io/server/tests/testutils"
+)
+
+// TestCluster allows executing cassandra operations in testing.
+type TestCluster struct {
+	dbName         string
+	schemaDir      string
+	cfg            config.SQL
+	faultInjection *config.FaultInjection
+	logger         log.Logger
+}
+
+type forceDatabaseDropper interface {
+	ForceDropDatabase(database string) error
+}
+
+// NewTestCluster returns a new SQL test cluster
+func NewTestCluster(
+	pluginName string,
+	dbName string,
+	username string,
+	password string,
+	host string,
+	port int,
+	connectAttributes map[string]string,
+	schemaDir string,
+	faultInjection *config.FaultInjection,
+	logger log.Logger,
+) *TestCluster {
+	var result TestCluster
+	result.logger = logger
+	result.dbName = dbName
+
+	result.schemaDir = schemaDir
+	result.cfg = config.SQL{
+		User:               username,
+		Password:           password,
+		ConnectAddr:        fmt.Sprintf("%v:%v", host, port),
+		ConnectProtocol:    "tcp",
+		PluginName:         pluginName,
+		DatabaseName:       dbName,
+		TaskScanPartitions: 4,
+		ConnectAttributes:  connectAttributes,
+	}
+
+	result.faultInjection = faultInjection
+	return &result
+}
+
+// DatabaseName from PersistenceTestCluster interface
+func (s *TestCluster) DatabaseName() string {
+	return s.dbName
+}
+
+// SetupTestDatabase from PersistenceTestCluster interface
+func (s *TestCluster) SetupTestDatabase() {
+	s.CreateDatabase()
+
+	if s.schemaDir == "" {
+		s.logger.Info("No schema directory provided, skipping schema setup")
+		return
+	}
+
+	schemaDir := s.schemaDir + "/"
+	if !strings.HasPrefix(schemaDir, "/") && !strings.HasPrefix(schemaDir, "../") {
+		temporalPackageDir := testutils.GetRepoRootDirectory()
+		schemaDir = path.Join(temporalPackageDir, schemaDir)
+	}
+	s.LoadSchema(path.Join(schemaDir, "temporal", "schema.sql"))
+	s.LoadSchema(path.Join(schemaDir, "visibility", "schema.sql"))
+	s.loadSchemaVersion()
+}
+
+// Config returns the persistence config for connecting to this test cluster
+func (s *TestCluster) Config() config.Persistence {
+	cfg := s.cfg
+	return config.Persistence{
+		DefaultStore:    "test",
+		VisibilityStore: "test",
+		DataStores: map[string]config.DataStore{
+			"test": {SQL: &cfg, FaultInjection: s.faultInjection},
+		},
+		TransactionSizeLimit: dynamicconfig.GetIntPropertyFn(primitives.DefaultTransactionSizeLimit),
+	}
+}
+
+// TearDownTestDatabase from PersistenceTestCluster interface
+func (s *TestCluster) TearDownTestDatabase() {
+	s.DropDatabase()
+}
+
+// CreateDatabase from PersistenceTestCluster interface
+func (s *TestCluster) CreateDatabase() {
+	cfg2 := s.cfg
+	// NOTE need to connect with empty name to create new database
+	if cfg2.PluginName != "sqlite" {
+		cfg2.DatabaseName = ""
+	}
+
+	db := s.newAdminDB(sqlplugin.DbKindUnknown, &cfg2)
+	defer s.closeAdminDB(db)
+	err := db.CreateDatabase(s.cfg.DatabaseName)
+	if err != nil {
+		panic(err)
+	}
+	s.logger.Info("created database", tag.String("database", s.cfg.DatabaseName))
+}
+
+// DropDatabase from PersistenceTestCluster interface
+func (s *TestCluster) DropDatabase() {
+	cfg2 := s.cfg
+
+	if cfg2.PluginName == "sqlite" && cfg2.DatabaseName != ":memory:" && cfg2.ConnectAttributes["mode"] != "memory" {
+		if len(cfg2.DatabaseName) > 3 { // 3 should mean not ., .., empty, or /
+			// Remove main database file
+			_ = os.Remove(cfg2.DatabaseName)
+			// Remove WAL mode files (may not exist if WAL wasn't used)
+			_ = os.Remove(cfg2.DatabaseName + "-wal")
+			_ = os.Remove(cfg2.DatabaseName + "-shm")
+		}
+		return
+	}
+
+	// NOTE need to connect with empty name to drop the database
+	cfg2.DatabaseName = ""
+	db := s.newAdminDB(sqlplugin.DbKindUnknown, &cfg2)
+	defer s.closeAdminDB(db)
+	var err error
+	if dropper, ok := db.(forceDatabaseDropper); ok {
+		err = dropper.ForceDropDatabase(s.cfg.DatabaseName)
+	} else {
+		err = db.DropDatabase(s.cfg.DatabaseName)
+	}
+	if err != nil {
+		panic(err)
+	}
+	s.logger.Info("dropped database", tag.String("database", s.cfg.DatabaseName))
+}
+
+// LoadSchema from PersistenceTestCluster interface
+func (s *TestCluster) LoadSchema(schemaFile string) {
+	statements, err := p.LoadAndSplitQuery([]string{schemaFile})
+	if err != nil {
+		s.logger.Fatal(
+			fmt.Sprintf("LoadSchema %s: %v", schemaFile, err),
+			tag.Error(err),
+			tag.String("database", s.cfg.DatabaseName),
+			tag.String("schema-file", schemaFile),
+		)
+	}
+
+	db := s.newAdminDB(sqlplugin.DbKindUnknown, &s.cfg)
+	defer s.closeAdminDB(db)
+
+	if rewriter, ok := db.(sqlplugin.SchemaStatementRewriter); ok {
+		statements = rewriter.RewriteSchemaStatements(statements)
+	}
+
+	for i, stmt := range statements {
+		if err = db.Exec(stmt); err != nil {
+			s.logger.Fatal(
+				fmt.Sprintf("LoadSchema statement %d for database %s: %v", i, s.cfg.DatabaseName, err),
+				tag.Error(err),
+				tag.String("database", s.cfg.DatabaseName),
+				tag.String("schema-file", schemaFile),
+				tag.Int("statement-index", i),
+				tag.String("statement", stmt),
+			)
+		}
+	}
+	s.logger.Info("loaded schema")
+}
+
+func (s *TestCluster) loadSchemaVersion() {
+	db := s.newAdminDB(sqlplugin.DbKindMain, &s.cfg)
+	defer s.closeAdminDB(db)
+
+	expectedVersion := db.ExpectedVersion()
+	if err := db.CreateSchemaVersionTables(); err != nil {
+		s.logger.Fatal("CreateSchemaVersionTables", tag.Error(err))
+	}
+	if err := db.UpdateSchemaVersion(s.cfg.DatabaseName, expectedVersion, expectedVersion); err != nil {
+		s.logger.Fatal("UpdateSchemaVersion", tag.Error(err))
+	}
+	if err := db.WriteSchemaUpdateLog("0", expectedVersion, "", "initial version"); err != nil {
+		s.logger.Fatal("WriteSchemaUpdateLog", tag.Error(err))
+	}
+	s.logger.Info("loaded schema version", tag.String("version", expectedVersion))
+}
+
+func (s *TestCluster) newAdminDB(kind sqlplugin.DbKind, cfg *config.SQL) sqlplugin.AdminDB {
+	var db sqlplugin.AdminDB
+	var err error
+	err = backoff.ThrottleRetry(
+		func() error {
+			db, err = NewSQLAdminDB(kind, cfg, resolver.NewNoopResolver(), log.NewTestLogger(), metrics.NoopMetricsHandler)
+			return err
+		},
+		backoff.NewExponentialRetryPolicy(time.Second).WithExpirationInterval(time.Minute),
+		nil,
+	)
+	if err != nil {
+		s.logger.Fatal("NewSQLAdminDB", tag.Error(err))
+	}
+	return db
+}
+
+func (s *TestCluster) closeAdminDB(db sqlplugin.AdminDB) {
+	if err := db.Close(); err != nil {
+		s.logger.Fatal("Close schema DB", tag.Error(err))
+	}
+}

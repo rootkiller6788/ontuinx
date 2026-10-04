@@ -1,0 +1,77 @@
+package queues
+
+import (
+	enumsspb "go.temporal.io/server/api/enums/v1"
+	"go.temporal.io/server/common/namespace"
+	"go.temporal.io/server/common/tasks"
+)
+
+type (
+	// PriorityAssigner assigns priority to task executables
+	PriorityAssigner interface {
+		Assign(Executable) tasks.Priority
+	}
+
+	priorityAssignerImpl struct {
+		currentClusterName string
+		nsRegistry         namespace.Registry
+	}
+
+	staticPriorityAssigner struct {
+		priority tasks.Priority
+	}
+)
+
+func NewPriorityAssigner(nsRegistry namespace.Registry, currentClusterName string) PriorityAssigner {
+	return &priorityAssignerImpl{
+		nsRegistry:         nsRegistry,
+		currentClusterName: currentClusterName,
+	}
+}
+
+func (a *priorityAssignerImpl) Assign(executable Executable) tasks.Priority {
+	ns, err := a.nsRegistry.GetNamespaceByID(namespace.ID(executable.GetNamespaceID()))
+	if ns != nil && err == nil {
+		// Use lowest priority level for standby task processing
+		if ns.ActiveClusterName(namespace.RoutingKey{ID: executable.GetWorkflowID()}) != a.currentClusterName {
+			return tasks.PriorityPreemptable
+		}
+	}
+
+	taskType := executable.GetType()
+	switch taskType {
+	case enumsspb.TASK_TYPE_ACTIVITY_TIMEOUT,
+		enumsspb.TASK_TYPE_WORKFLOW_TASK_TIMEOUT,
+		enumsspb.TASK_TYPE_WORKFLOW_RUN_TIMEOUT,
+		enumsspb.TASK_TYPE_WORKFLOW_EXECUTION_TIMEOUT,
+		enumsspb.TASK_TYPE_WORKER_COMMANDS:
+		return tasks.PriorityLow
+	case enumsspb.TASK_TYPE_DELETE_HISTORY_EVENT,
+		enumsspb.TASK_TYPE_TRANSFER_DELETE_EXECUTION,
+		enumsspb.TASK_TYPE_VISIBILITY_DELETE_EXECUTION,
+		enumsspb.TASK_TYPE_ARCHIVAL_ARCHIVE_EXECUTION,
+		enumsspb.TASK_TYPE_UNSPECIFIED:
+		// add more task types here if we believe it's ok to delay those tasks
+		// and assign them the same priority as throttled tasks
+		return tasks.PriorityPreemptable
+	}
+
+	if _, ok := enumsspb.TaskType_name[int32(taskType)]; !ok {
+		// low priority for unknown task types
+		return tasks.PriorityPreemptable
+	}
+
+	return tasks.PriorityHigh
+}
+
+func NewNoopPriorityAssigner() PriorityAssigner {
+	return NewStaticPriorityAssigner(tasks.PriorityHigh)
+}
+
+func NewStaticPriorityAssigner(priority tasks.Priority) PriorityAssigner {
+	return staticPriorityAssigner{priority: priority}
+}
+
+func (a staticPriorityAssigner) Assign(_ Executable) tasks.Priority {
+	return a.priority
+}

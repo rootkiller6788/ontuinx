@@ -1,0 +1,44 @@
+# Assurance configuration — version-controlled, auditable, explicit.
+# No auto-detection. No silent fallback. What you declare is what runs.
+# Schema: crates/domains/code/src/config.rs
+
+domains = ["code"]
+
+[profiles.code]
+name = "Code Assurance"
+
+[profiles.code.languages.rust]
+profile = "onto.code.rust.v1"
+required_levels = "all"
+
+[profiles.code.languages.go]
+profile = "onto.code.go.v1"
+required_levels = "all"
+
+[profiles.code.languages.python]
+profile = "onto.code.python.v1"
+required_levels = "all"
+
+[profiles.code.languages.typescript]
+profile = "onto.code.typescript.v1"
+required_levels = "all"
+
+[profiles.code.languages.java]
+profile = "onto.code.java.v1"
+required_levels = "lint+test"
+
+[profiles.code.languages.kotlin]
+profile = "onto.code.kotlin.v1"
+required_levels = "lint+test"
+
+[profiles.code.languages.cpp]
+profile = "onto.code.cpp.v1"
+required_levels = "lint+test"
+
+[profiles.code.scope]
+mode = "diff"
+
+[profiles.code.enforcement]
+advisory_ceiling = "low"
+fail_on_verifier_unavailable = true
+require_ironclaw = true

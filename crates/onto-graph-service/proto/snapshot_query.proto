@@ -1,0 +1,35 @@
+syntax = "proto3";
+package ocg.snapshot_query.v1;
+
+// ── 快照完整性查询服务 ──
+// P7 GraphIntegrityVerifier 使用此 RPC 检查 Candidate 图谱是否就绪
+
+service SnapshotQueryService {
+  rpc CheckIntegrity(CheckIntegrityRequest) returns (CheckIntegrityResponse);
+}
+
+message CheckIntegrityRequest {
+  string repository_name = 1;
+  string base_commit_sha = 2;
+  string candidate_checkpoint_hash = 3;
+  uint64 execution_generation = 4;
+  repeated string changed_files = 5;
+  repeated string required_passes = 6;
+}
+
+message CheckIntegrityResponse {
+  bool snapshot_exists = 1;
+  bool is_sealed = 2;
+  bool checkpoint_matches = 3;
+  bool generation_matches = 4;
+  bool all_files_processed = 5;
+  bool coverage_complete = 6;
+  string snapshot_id = 7;
+  string graph_content_hash = 8;
+  int64 node_count = 9;
+  int64 edge_count = 10;
+  string coverage_status = 11;
+  repeated string unprocessed_files = 12;
+  repeated string missing_passes = 13;
+  string error_detail = 14;
+}

@@ -1,0 +1,6 @@
+{
+  "_note": "This fixture is a meta-invariant scenario, not a pipeline fixture. It describes expected behavior for the 'replay_mismatch' scenario.",
+  "scenario": "replay_mismatch",
+  "fixture_type": "invariant",
+  "expected_behavior": "Replay of a successful run produces different evidence hash — tampering detected"
+}

@@ -1,0 +1,24 @@
+profile_id = "onto.code.rust.v1"
+description = "OntoOS Rust code verification profile"
+
+required_verifiers = [
+  "cargo-check",
+  "cargo-test",
+  "cargo-clippy",
+  "ironclaw-semantic"
+]
+
+[enforcement]
+build = "required"
+test = "required"
+lint = "required"
+semantic = "advisory"
+
+[evidence]
+require_snapshot_binding = true
+require_location_resolution = true
+allow_unresolved_semantic_findings = false
+
+[budget]
+max_verifier_calls = 20
+max_tokens_per_semantic_unit = 4000

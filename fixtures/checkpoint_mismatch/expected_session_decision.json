@@ -1,0 +1,6 @@
+{
+  "_note": "This fixture is a meta-invariant scenario, not a pipeline fixture. It describes expected behavior for the 'checkpoint_mismatch' scenario.",
+  "scenario": "checkpoint_mismatch",
+  "fixture_type": "invariant",
+  "expected_behavior": "Recovery finds checkpoint context hash differs from current verification context"
+}

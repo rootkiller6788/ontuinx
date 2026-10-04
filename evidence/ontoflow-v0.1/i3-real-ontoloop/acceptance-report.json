@@ -1,0 +1,19 @@
+{
+  "phase": "I3",
+  "name": "Real OntoLoop Multi-Attempt Execution",
+  "timestamp": "2026-07-27T09:35:00+08:00",
+  "status": "PROVEN",
+  "acceptance": {
+    "I3-1": {"test": "Rust Worker calls OntoLoop", "status": "PASS", "evidence": "onto-worker binary runs RuntimeLoopRunner::execute()"},
+    "I3-2": {"test": "Attempt 1 fails, Attempt 2 created", "status": "PASS", "evidence": "total_attempts=2, Attempt 1=Failed, Attempt 2=Success"},
+    "I3-3": {"test": "Attempt 2 receives structured Continuation", "status": "PASS", "evidence": "LoopAdapter.evaluate() returns Continue with structured gaps"},
+    "I3-4": {"test": "Different Checkpoints per Attempt", "status": "PASS", "evidence": "output_checkpoint_hash unique per attempt"},
+    "I3-5": {"test": "Old Evidence cannot submit Attempt 2", "status": "PASS", "evidence": "L3 cross-branch evidence rejection validated"},
+    "I3-6": {"test": "Attempt 2 generates real Decision", "status": "PASS", "evidence": "decision_id=UUIDv7, decision_hash present"},
+    "I3-7": {"test": "M6 settlement completed", "status": "PASS", "evidence": "LoopDecision::Commit triggered by Success+Committed"},
+    "I3-8": {"test": "Envelope binds Checkpoint+Decision", "status": "PASS", "evidence": "output_checkpoint_hash matches, request_binding_hash preserved"}
+  },
+  "envelope": "evidence/ontoflow-v0.1/i3-real-ontoloop/envelope.json",
+  "worker_binary": "target/debug/onto-worker",
+  "key_invariant": "Two real attempts, only final attempt produces Committed+Decision"
+}

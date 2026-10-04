@@ -1,0 +1,4 @@
+use serde::{Deserialize,Serialize};
+#[derive(Debug,Clone,Serialize,Deserialize)] pub struct VerificationBudget{pub max_tokens:u64,pub tokens_used:u64,pub max_duration_seconds:u64,pub max_verifier_calls:u32,pub verifier_calls_used:u32,pub max_parallel_units:u32}
+impl VerificationBudget{pub fn new(max_tokens:u64,max_duration_seconds:u64)->Self{Self{max_tokens,tokens_used:0,max_duration_seconds,max_verifier_calls:100,verifier_calls_used:0,max_parallel_units:4}} pub fn tokens_exhausted(&self)->bool{self.tokens_used>=self.max_tokens} pub fn verifier_calls_exhausted(&self)->bool{self.verifier_calls_used>=self.max_verifier_calls} pub fn any_exhausted(&self)->bool{self.tokens_exhausted()||self.verifier_calls_exhausted()} pub fn record_call(&mut self){self.verifier_calls_used+=1} pub fn add_tokens(&mut self,t:u64){self.tokens_used+=t}}
+#[derive(Debug,Clone,Copy)] pub struct VerifierBudgetGrant{pub max_tokens:u64,pub max_output_tokens:u64}

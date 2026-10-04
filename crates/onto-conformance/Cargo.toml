@@ -1,0 +1,22 @@
+[package]
+name = "onto-conformance"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT OR Apache-2.0"
+description = "Golden fixture runner — reads fixtures, runs Onto kernel, outputs deterministic JSON for Python↔Rust comparison"
+
+[[bin]]
+name = "onto-conformance"
+path = "src/main.rs"
+
+[dependencies]
+onto-assurance-types = { path = "../onto-assurance-types" }
+onto-assurance-core = { path = "../onto-assurance-core" }
+onto-ironclaw-adapter = { path = "../onto-ironclaw-adapter" }
+onto-pack-sdk = { path = "../onto-pack-sdk" }
+onto-assurance-domain-code = { path = "../domains/code" }
+onto-pack = { path = "../onto-pack" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }

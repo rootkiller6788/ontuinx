@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ontoos.dev/schemas/v1/verified_loop_outcome.schema.json",
+  "title": "VerifiedLoopOutcome",
+  "description": "AuthorityProjectionPort response. Go queries this after receiving LoopTerminalEnvelope.",
+  "type": "object",
+  "required": [
+    "loop_id", "outcome", "decision_id", "decision_hash",
+    "output_checkpoint_hash", "authority_binding_hash"
+  ],
+  "properties": {
+    "loop_id": { "type": "string", "minLength": 1 },
+    "outcome": {
+      "type": "string",
+      "enum": ["committed", "not_committed", "decision_not_found", "binding_mismatch"]
+    },
+    "decision_id": { "type": "string" },
+    "decision_hash": { "type": "string" },
+    "output_checkpoint_hash": { "type": "string" },
+    "settlement_receipt_ref": { "type": "string" },
+    "authority_binding_hash": { "type": "string", "minLength": 1 }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Pre-push hook: runs quality gate before pushing
+# Skip with: git push --no-verify
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+SCRIPT_DIR="$REPO_ROOT/scripts/ci"
+
+# Default: baseline quality gate
+"$SCRIPT_DIR/quality_gate.sh"
+
+# Fast static checks (no compile) — catch deterministic breakers that a
+# host-only build misses. See issue #6018.
+#   - include_str! targets exist AND are in every Dockerfile build context
+#     (the #5603 Docker outage class).
+#   - newly-added raw std::env::set_var/remove_var is guarded (the #6015
+#     coverage-flake / Rust 1.82 UB class).
+echo "==> static: include_str! paths + Docker COPY coverage"
+"$SCRIPT_DIR/check-include-str-paths.sh"
+echo "==> static: hermetic env mutation"
+"$SCRIPT_DIR/check-hermetic-env.sh"
+
+# Optional strict delta lint (env-gated)
+if [ "${IRONCLAW_STRICT_DELTA_LINT:-0}" = "1" ]; then
+    "$SCRIPT_DIR/delta_lint.sh" "$1"
+elif [ "${IRONCLAW_STRICT_LINT:-0}" = "1" ]; then
+    echo "==> clippy (strict: all warnings, all targets)"
+    cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+fi

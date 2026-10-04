@@ -1,0 +1,55 @@
+[workspace]
+members = [
+    "crates/onto-assurance-types",
+    "crates/onto-assurance-core",
+    "crates/onto-assurance-runtime",
+    "crates/onto-ironclaw-adapter",
+    "crates/onto-pack-sdk",
+    "crates/onto-code-pack",
+    "crates/onto-integration-test",
+    "crates/onto-conformance",
+    "crates/onto-loop",
+    "crates/onto-temporal-adapter",
+    "crates/onto-graph-verifiers",
+    "crates/onto-graph-core",
+    "crates/onto-graph-service",
+    "crates/onto-graph-mcp",
+    "crates/onto-protocol",
+]
+resolver = "2"
+
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/nearai/ontoos"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+thiserror = "2"
+chrono = { version = "0.4", features = ["serde"] }
+async-trait = "0.1"
+
+# Internal
+onto-assurance-types = { path = "crates/onto-assurance-types" }
+onto-assurance-core = { path = "crates/onto-assurance-core" }
+onto-assurance-runtime = { path = "crates/onto-assurance-runtime" }
+onto-ironclaw-adapter = { path = "crates/onto-ironclaw-adapter" }
+onto-pack-sdk = { path = "crates/onto-pack-sdk" }
+onto-code-pack = { path = "crates/onto-code-pack" }
+onto-graph-verifiers = { path = "crates/onto-graph-verifiers" }
+
+# ── Lint guards ──
+[workspace.lints.rust]
+unreachable_pub = "warn"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

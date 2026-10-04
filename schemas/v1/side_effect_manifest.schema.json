@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ontoos.dev/schemas/v1/side_effect_manifest.schema.json",
+  "title": "side_effect_manifest",
+  "description": "Schema frozen at v1. See ontocode-python-assurance-reference-v1 for the authoritative implementation.",
+  "type": "object",
+  "properties": {
+    "schema_version": { "const": "v1" },
+    "kernel_version": { "type": "string" },
+    "created_at": { "type": "string", "format": "date-time" }
+  }
+}

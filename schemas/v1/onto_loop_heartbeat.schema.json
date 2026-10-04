@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ontoos.dev/schemas/v1/onto_loop_heartbeat.schema.json",
+  "title": "OntoLoopHeartbeat",
+  "description": "Rust Worker → OntoFlow heartbeat. Informs liveness, NOT success determination.",
+  "type": "object",
+  "required": ["flow_id", "work_item_id", "loop_id", "lifecycle_state"],
+  "properties": {
+    "flow_id": { "type": "string", "minLength": 1 },
+    "work_item_id": { "type": "string", "minLength": 1 },
+    "loop_id": { "type": "string", "minLength": 1 },
+    "current_attempt_id": { "type": "string" },
+    "current_run_id": { "type": "string" },
+    "lifecycle_state": {
+      "type": "string",
+      "enum": ["executing", "waiting", "terminal", "unknown"]
+    },
+    "progress_snapshot_hash": { "type": "string" },
+    "last_decision_id": { "type": "string" },
+    "current_checkpoint_id": { "type": "string" }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,260 @@
+package payload
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	commonpb "go.temporal.io/api/common/v1"
+)
+
+type testStruct struct {
+	Int    int
+	String string
+	Bytes  []byte
+}
+
+func TestToString(t *testing.T) {
+	s := assert.New(t)
+	var result string
+
+	p := EncodeString("str")
+	result = ToString(p)
+	s.Equal(`"str"`, result)
+
+	p, err := Encode(10)
+	s.NoError(err)
+	result = ToString(p)
+	s.Equal("10", result)
+
+	p, err = Encode([]byte{41, 42, 43})
+	s.NoError(err)
+	result = ToString(p)
+	s.Equal("KSor", result)
+
+	p, err = Encode(&testStruct{
+		Int:    10,
+		String: "str",
+		Bytes:  []byte{51, 52, 53},
+	})
+	s.NoError(err)
+	result = ToString(p)
+	s.JSONEq(`{"Int":10,"String":"str","Bytes":"MzQ1"}`, result)
+
+	p, err = Encode(nil)
+	s.NoError(err)
+	result = ToString(p)
+	s.Equal("nil", result)
+
+	result = ToString(nil)
+	s.Empty(result)
+}
+
+func TestEncodeDecode(t *testing.T) {
+	s := assert.New(t)
+
+	var p *commonpb.Payload
+	var err error
+
+	var decodedValueStr string
+	valueStr := "asdf"
+	p, err = Encode(valueStr)
+	s.NoError(err)
+	err = Decode(p, &decodedValueStr)
+	s.NoError(err)
+	s.Equal(valueStr, decodedValueStr)
+
+	var decodedValueInt int64
+	valueInt := int64(1234)
+	p, err = Encode(valueInt)
+	s.NoError(err)
+	err = Decode(p, &decodedValueInt)
+	s.NoError(err)
+	s.Equal(valueInt, decodedValueInt)
+
+	var decodedValueBool bool
+	valueBool := true
+	p, err = Encode(valueBool)
+	s.NoError(err)
+	err = Decode(p, &decodedValueBool)
+	s.NoError(err)
+	s.Equal(valueBool, decodedValueBool)
+
+	var decodedValueAny any
+	var valueAny any = 123.45
+	p, err = Encode(valueAny)
+	s.NoError(err)
+	err = Decode(p, &decodedValueAny)
+	s.NoError(err)
+	s.Equal(valueAny, decodedValueAny)
+}
+
+func TestMergeMapOfPayload(t *testing.T) {
+	t.Run("nil map", func(t *testing.T) {
+		var currentMap map[string]*commonpb.Payload
+		var newMap map[string]*commonpb.Payload
+		resultMap := MergeMapOfPayload(currentMap, newMap)
+		require.Equal(t, newMap, resultMap)
+	})
+
+	t.Run("empty map", func(t *testing.T) {
+		var currentMap map[string]*commonpb.Payload
+		newMap := make(map[string]*commonpb.Payload)
+		resultMap := MergeMapOfPayload(currentMap, newMap)
+		require.Equal(t, newMap, resultMap)
+	})
+
+	t.Run("nil map merging key with string value", func(t *testing.T) {
+		var currentMap map[string]*commonpb.Payload
+		newMap := map[string]*commonpb.Payload{"key": EncodeString("val")}
+		resultMap := MergeMapOfPayload(currentMap, newMap)
+		require.Equal(t, newMap, resultMap)
+	})
+
+	t.Run("non nil maps", func(t *testing.T) {
+		currentMap := map[string]*commonpb.Payload{"number": EncodeString("1")}
+		newMap := map[string]*commonpb.Payload{"key": EncodeString("val")}
+		resultMap := MergeMapOfPayload(currentMap, newMap)
+		require.Equal(
+			t,
+			map[string]*commonpb.Payload{"number": EncodeString("1"), "key": EncodeString("val")},
+			resultMap,
+		)
+	})
+
+	t.Run("nil payloads are filtered", func(t *testing.T) {
+		var currentMap map[string]*commonpb.Payload
+		newMap := map[string]*commonpb.Payload{
+			"key":        EncodeString("val"),
+			"nil":        {},
+			"nilSlice":   {Data: []byte("null")}, // nil slice is encoded as null json value
+			"emptySlice": {Data: []byte("[]")},
+		}
+		resultMap := MergeMapOfPayload(currentMap, newMap)
+		require.Equal(t, map[string]*commonpb.Payload{"key": EncodeString("val")}, resultMap)
+	})
+}
+
+func TestFilterNilSearchAttributes(t *testing.T) {
+	s := assert.New(t)
+
+	// nil input returns nil
+	result := FilterNilSearchAttributes(nil)
+	s.Nil(result)
+
+	// empty SearchAttributes returns nil
+	emptySA := &commonpb.SearchAttributes{IndexedFields: map[string]*commonpb.Payload{}}
+	result = FilterNilSearchAttributes(emptySA)
+	s.Nil(result)
+
+	// SearchAttributes with only valid values returns filtered copy
+	validPayload := EncodeString("value")
+	saNonNil := &commonpb.SearchAttributes{
+		IndexedFields: map[string]*commonpb.Payload{
+			"key1": validPayload,
+		},
+	}
+	result = FilterNilSearchAttributes(saNonNil)
+	s.NotNil(result)
+	s.Len(result.IndexedFields, 1)
+	s.Equal(validPayload, result.IndexedFields["key1"])
+
+	// SearchAttributes with nil values filters them out
+	nilPayloadVal, _ := Encode(nil)
+	saMixed := &commonpb.SearchAttributes{
+		IndexedFields: map[string]*commonpb.Payload{
+			"valid":  validPayload,
+			"nilVal": nilPayloadVal,
+		},
+	}
+	result = FilterNilSearchAttributes(saMixed)
+	s.NotNil(result)
+	s.Len(result.IndexedFields, 1)
+	s.Equal(validPayload, result.IndexedFields["valid"])
+	s.Nil(result.IndexedFields["nilVal"])
+
+	// SearchAttributes with empty slice values filters them out
+	emptySlicePayloadVal, _ := Encode([]string{})
+	saEmptySlice := &commonpb.SearchAttributes{
+		IndexedFields: map[string]*commonpb.Payload{
+			"valid":      validPayload,
+			"emptySlice": emptySlicePayloadVal,
+		},
+	}
+	result = FilterNilSearchAttributes(saEmptySlice)
+	s.NotNil(result)
+	s.Len(result.IndexedFields, 1)
+	s.Equal(validPayload, result.IndexedFields["valid"])
+
+	// SearchAttributes with all nil/empty values returns nil
+	saAllNil := &commonpb.SearchAttributes{
+		IndexedFields: map[string]*commonpb.Payload{
+			"nil1": nilPayloadVal,
+			"nil2": emptySlicePayloadVal,
+		},
+	}
+	result = FilterNilSearchAttributes(saAllNil)
+	s.Nil(result)
+}
+
+func TestFilterNilMemo(t *testing.T) {
+	s := assert.New(t)
+
+	// nil input returns nil
+	result := FilterNilMemo(nil)
+	s.Nil(result)
+
+	// empty Memo returns nil
+	emptyMemo := &commonpb.Memo{Fields: map[string]*commonpb.Payload{}}
+	result = FilterNilMemo(emptyMemo)
+	s.Nil(result)
+
+	// Memo with only valid values returns filtered copy
+	validPayload := EncodeString("value")
+	memoNonNil := &commonpb.Memo{
+		Fields: map[string]*commonpb.Payload{
+			"key1": validPayload,
+		},
+	}
+	result = FilterNilMemo(memoNonNil)
+	s.NotNil(result)
+	s.Len(result.Fields, 1)
+	s.Equal(validPayload, result.Fields["key1"])
+
+	// Memo with nil values filters them out
+	nilPayloadVal, _ := Encode(nil)
+	memoMixed := &commonpb.Memo{
+		Fields: map[string]*commonpb.Payload{
+			"valid":  validPayload,
+			"nilVal": nilPayloadVal,
+		},
+	}
+	result = FilterNilMemo(memoMixed)
+	s.NotNil(result)
+	s.Len(result.Fields, 1)
+	s.Equal(validPayload, result.Fields["valid"])
+	s.Nil(result.Fields["nilVal"])
+
+	// Memo with empty slice values filters them out
+	emptySlicePayloadVal, _ := Encode([]string{})
+	memoEmptySlice := &commonpb.Memo{
+		Fields: map[string]*commonpb.Payload{
+			"valid":      validPayload,
+			"emptySlice": emptySlicePayloadVal,
+		},
+	}
+	result = FilterNilMemo(memoEmptySlice)
+	s.NotNil(result)
+	s.Len(result.Fields, 1)
+	s.Equal(validPayload, result.Fields["valid"])
+
+	// Memo with all nil/empty values returns nil
+	memoAllNil := &commonpb.Memo{
+		Fields: map[string]*commonpb.Payload{
+			"nil1": nilPayloadVal,
+			"nil2": emptySlicePayloadVal,
+		},
+	}
+	result = FilterNilMemo(memoAllNil)
+	s.Nil(result)
+}

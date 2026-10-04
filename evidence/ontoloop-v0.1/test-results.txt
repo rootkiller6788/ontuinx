@@ -1,0 +1,32 @@
+
+running 13 tests
+test budget::tests::l5_1_success_with_depleted_budget_orthogonal ... ok
+test budget::tests::l5_3_regression_count_exhausted ... ok
+test budget::tests::l5_4_reset_no_progress_on_improvement ... ok
+test budget::tests::l5_2_consecutive_no_progress_stops ... ok
+test checkpoint::tests::l3_1_evidence_must_match_checkpoint ... ok
+test checkpoint::tests::l3_3_rollback_selects_parent_checkpoint ... ok
+test checkpoint::tests::l3_2_decision_must_bind_current_checkpoint ... ok
+test checkpoint::tests::l3_4_cross_branch_evidence_rejected ... ok
+test progress::tests::l4_1_gained_criterion_improved ... ok
+test progress::tests::l4_2_hash_changed_but_criteria_unchanged ... ok
+test progress::tests::l4_4_gained_and_lost_incomparable ... ok
+test progress::tests::l4_3_lost_criterion_regressed ... ok
+test progress::tests::l4_5_violations_increased_regressed ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 4 tests
+test loop_adapter::tests::l6_2_same_attempt_id_rejected ... ok
+test loop_adapter::tests::l7_e2e_two_attempts ... ok
+test loop_adapter::tests::l6_3_decision_from_ontoassure_not_agent_text ... ok
+test loop_adapter::tests::l6_1_metadata_passed_to_runtime ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 123 filtered out; finished in 0.00s
+

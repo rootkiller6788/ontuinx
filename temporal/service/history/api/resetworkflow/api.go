@@ -1,0 +1,295 @@
+package resetworkflow
+
+import (
+	"context"
+	"errors"
+
+	"github.com/google/uuid"
+	enumspb "go.temporal.io/api/enums/v1"
+	"go.temporal.io/api/serviceerror"
+	workflowpb "go.temporal.io/api/workflow/v1"
+	"go.temporal.io/server/api/historyservice/v1"
+	"go.temporal.io/server/api/matchingservice/v1"
+	"go.temporal.io/server/chasm"
+	"go.temporal.io/server/common"
+	"go.temporal.io/server/common/definition"
+	"go.temporal.io/server/common/locks"
+	"go.temporal.io/server/common/log/tag"
+	"go.temporal.io/server/common/metrics"
+	"go.temporal.io/server/common/namespace"
+	"go.temporal.io/server/common/persistence/versionhistory"
+	"go.temporal.io/server/common/worker_versioning"
+	"go.temporal.io/server/service/history/api"
+	"go.temporal.io/server/service/history/consts"
+	historyi "go.temporal.io/server/service/history/interfaces"
+	"go.temporal.io/server/service/history/ndc"
+)
+
+func Invoke(
+	ctx context.Context,
+	resetRequest *historyservice.ResetWorkflowExecutionRequest,
+	shardContext historyi.ShardContext,
+	workflowConsistencyChecker api.WorkflowConsistencyChecker,
+	matchingClient matchingservice.MatchingServiceClient,
+	versionCache worker_versioning.VersionMembershipAndReactivationStatusCache,
+	reactivationSignaler api.VersionReactivationSignalerFn,
+) (_ *historyservice.ResetWorkflowExecutionResponse, retError error) {
+	namespaceID := namespace.ID(resetRequest.GetNamespaceId())
+	err := api.ValidateNamespaceUUID(namespaceID)
+	if err != nil {
+		return nil, err
+	}
+
+	request := resetRequest.ResetRequest
+	workflowID := request.WorkflowExecution.GetWorkflowId()
+
+	if rl := shardContext.BusinessIDReuseRateLimiter(namespaceID, workflowID, chasm.WorkflowArchetypeID); rl != nil && !rl.Allow() {
+		archetypeName, _ := shardContext.ChasmRegistry().ArchetypeDisplayName(chasm.WorkflowArchetypeID)
+		metrics.BusinessIDReuseRateLimited.With(shardContext.GetMetricsHandler()).Record(
+			1,
+			metrics.ResourceExhaustedCauseTag(consts.ErrBusinessIDRateLimitExceeded.Cause),
+			metrics.ResourceExhaustedScopeTag(consts.ErrBusinessIDRateLimitExceeded.Scope),
+			metrics.StringTag("archetype", archetypeName),
+		)
+		return nil, consts.ErrBusinessIDRateLimitExceeded
+	}
+	baseRunID := request.WorkflowExecution.GetRunId()
+
+	baseWorkflowLease, err := workflowConsistencyChecker.GetWorkflowLease(
+		ctx,
+		nil,
+		definition.NewWorkflowKey(
+			namespaceID.String(),
+			workflowID,
+			baseRunID,
+		),
+		locks.PriorityHigh,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { baseWorkflowLease.GetReleaseFn()(retError) }()
+
+	baseMutableState := baseWorkflowLease.GetMutableState()
+	if request.GetWorkflowTaskFinishEventId() <= common.FirstEventID ||
+		request.GetWorkflowTaskFinishEventId() >= baseMutableState.GetNextEventID() {
+		return nil, serviceerror.NewInvalidArgument("Workflow task finish ID must be > 1 && <= workflow last event ID.")
+	}
+
+	// Validate versioning override, if any.
+	shouldSkipReactivationPerOp, revisionNumberPerOp, err := validatePostResetOperationInputs(ctx, request.GetPostResetOperations(), matchingClient, versionCache,
+		baseMutableState.GetExecutionInfo().GetTaskQueue(), namespaceID.String())
+	if err != nil {
+		return nil, err
+	}
+
+	// also load the current run of the workflow, it can be different from the base runID
+	currentRunID, err := workflowConsistencyChecker.GetCurrentWorkflowRunID(
+		ctx,
+		namespaceID.String(),
+		request.WorkflowExecution.GetWorkflowId(),
+		locks.PriorityHigh,
+	)
+	currentExecutionMissing, err := shouldTolerateMissingCurrentExecution(err, baseRunID)
+	if err != nil {
+		return nil, err
+	}
+	if baseRunID == "" {
+		baseRunID = currentRunID
+	}
+
+	var currentWorkflowLease api.WorkflowLease
+	switch {
+	case currentExecutionMissing:
+		// no current run to lease; leave the lease nil.
+	case currentRunID == baseRunID:
+		currentWorkflowLease = baseWorkflowLease
+	default:
+		currentWorkflowLease, err = workflowConsistencyChecker.GetWorkflowLease(
+			ctx,
+			nil,
+			definition.NewWorkflowKey(
+				namespaceID.String(),
+				workflowID,
+				currentRunID,
+			),
+			locks.PriorityHigh,
+		)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { currentWorkflowLease.GetReleaseFn()(retError) }()
+	}
+
+	// dedup by requestID
+	if currentWorkflowLease != nil &&
+		currentWorkflowLease.GetMutableState().GetExecutionState().CreateRequestId == request.GetRequestId() {
+		shardContext.GetLogger().Info("Duplicated reset request",
+			tag.WorkflowID(workflowID),
+			tag.WorkflowRunID(currentRunID),
+			tag.WorkflowNamespaceID(namespaceID.String()))
+		return &historyservice.ResetWorkflowExecutionResponse{
+			RunId: currentRunID,
+		}, nil
+	}
+
+	resetRunID := uuid.New().String()
+	baseRebuildLastEventID := request.GetWorkflowTaskFinishEventId() - 1
+	baseVersionHistories := baseMutableState.GetExecutionInfo().GetVersionHistories()
+	baseCurrentVersionHistory, err := versionhistory.GetCurrentVersionHistory(baseVersionHistories)
+	if err != nil {
+		return nil, err
+	}
+	baseRebuildLastEventVersion, err := versionhistory.GetVersionHistoryEventVersion(baseCurrentVersionHistory, baseRebuildLastEventID)
+	if err != nil {
+		return nil, err
+	}
+	baseCurrentBranchToken := baseCurrentVersionHistory.GetBranchToken()
+	baseNextEventID := baseMutableState.GetNextEventID()
+	baseWorkflow := ndc.NewWorkflow(
+		shardContext.GetClusterMetadata(),
+		baseWorkflowLease.GetContext(),
+		baseWorkflowLease.GetMutableState(),
+		baseWorkflowLease.GetReleaseFn(),
+	)
+
+	namespaceEntry, err := api.GetActiveNamespace(shardContext, namespaceID, workflowID)
+	if err != nil {
+		return nil, err
+	}
+
+	metrics.WorkflowResetCount.With(
+		shardContext.GetMetricsHandler().WithTags(
+			metrics.NamespaceTag(namespaceEntry.Name().String()),
+			metrics.OperationTag(metrics.HistoryResetWorkflowScope),
+			metrics.VersioningBehaviorTag(baseMutableState.GetEffectiveVersioningBehavior()),
+		),
+	).Record(1)
+
+	var currentWorkflow ndc.Workflow
+	if currentWorkflowLease != nil {
+		currentWorkflow = ndc.NewWorkflow(
+			shardContext.GetClusterMetadata(),
+			currentWorkflowLease.GetContext(),
+			currentWorkflowLease.GetMutableState(),
+			currentWorkflowLease.GetReleaseFn(),
+		)
+	}
+
+	allowResetWithPendingChildren := shardContext.GetConfig().AllowResetWithPendingChildren(namespaceEntry.Name().String())
+	if err := ndc.NewWorkflowResetter(
+		shardContext,
+		workflowConsistencyChecker.GetWorkflowCache(),
+		shardContext.GetLogger(),
+	).ResetWorkflow(
+		ctx,
+		namespaceID,
+		workflowID,
+		baseRunID,
+		baseCurrentBranchToken,
+		baseRebuildLastEventID,
+		baseRebuildLastEventVersion,
+		baseNextEventID,
+		resetRunID,
+		baseWorkflow,
+		currentWorkflow,
+		request.GetReason(),
+		nil,
+		GetResetReapplyExcludeTypes(request.GetResetReapplyExcludeTypes(), request.GetResetReapplyType()),
+		allowResetWithPendingChildren,
+		resetRequest.ResetRequest.PostResetOperations,
+	); err != nil {
+		return nil, err
+	}
+
+	// Notify version workflow if we're pinning to a potentially drained version via post-reset operations
+	for i, operation := range request.GetPostResetOperations() {
+		if updateOpts, ok := operation.GetVariant().(*workflowpb.PostResetOperation_UpdateWorkflowOptions_); ok {
+			api.ReactivateVersionWorkflowIfPinned(ctx, namespaceEntry,
+				updateOpts.UpdateWorkflowOptions.GetWorkflowExecutionOptions().GetVersioningOverride(), reactivationSignaler, shardContext.GetConfig().EnableVersionReactivationSignals(), shouldSkipReactivationPerOp[i], revisionNumberPerOp[i])
+		}
+	}
+
+	return &historyservice.ResetWorkflowExecutionResponse{
+		RunId: resetRunID,
+	}, nil
+}
+
+// shouldTolerateMissingCurrentExecution reports whether a failure to resolve the current execution
+// should be tolerated (reset proceeds with no current run). A NotFound is tolerated only when an
+// explicit base runId was provided; without one there is nothing to reset from. Any other error is
+// returned unchanged.
+func shouldTolerateMissingCurrentExecution(currentErr error, baseRunID string) (currentExecutionMissing bool, err error) {
+	if currentErr == nil {
+		return false, nil
+	}
+	var notFound *serviceerror.NotFound
+	if errors.As(currentErr, &notFound) && baseRunID != "" {
+		return true, nil
+	}
+	return false, currentErr
+}
+
+// GetResetReapplyExcludeTypes computes the set of requested exclude types. It
+// uses the reset_reapply_exclude_types request field (a set of event types to
+// exclude from reapply), as well as the deprecated reset_reapply_type request
+// field (a specification of what to include).
+func GetResetReapplyExcludeTypes(
+	excludeTypes []enumspb.ResetReapplyExcludeType,
+	includeType enumspb.ResetReapplyType,
+) map[enumspb.ResetReapplyExcludeType]struct{} {
+	// A client who wishes to have reapplication of all supported event types should omit the deprecated
+	// reset_reapply_type field (since its default value is RESET_REAPPLY_TYPE_ALL_ELIGIBLE).
+	exclude := map[enumspb.ResetReapplyExcludeType]struct{}{}
+	switch includeType {
+	case enumspb.RESET_REAPPLY_TYPE_SIGNAL:
+		// A client sending this value of the deprecated reset_reapply_type field will not have any events other than
+		// signal reapplied.
+		exclude[enumspb.RESET_REAPPLY_EXCLUDE_TYPE_UPDATE] = struct{}{}
+	case enumspb.RESET_REAPPLY_TYPE_NONE:
+		exclude[enumspb.RESET_REAPPLY_EXCLUDE_TYPE_SIGNAL] = struct{}{}
+		exclude[enumspb.RESET_REAPPLY_EXCLUDE_TYPE_UPDATE] = struct{}{}
+	case enumspb.RESET_REAPPLY_TYPE_UNSPECIFIED, enumspb.RESET_REAPPLY_TYPE_ALL_ELIGIBLE:
+		// Do nothing.
+	}
+	for _, e := range excludeTypes {
+		exclude[e] = struct{}{}
+	}
+	return exclude
+}
+
+// validatePostResetOperationInputs validates the optional post reset operation inputs.
+// Returns parallel slices (one entry per operation) carrying the reactivation-signal inputs
+// derived from the operation's versioning override:
+//   - shouldSkipReactivationPerOp: whether each operation's pinned version is active or
+//     still draining per matching (true → no need to send a reactivation signal; false
+//     covers drained/inactive, unknown, not-found, and old-matching cases).
+//   - revisionNumberPerOp: the pinned version's revision number per matching's view, used to
+//     compose a stable RequestId on the reactivation signal for receiver-side dedup.
+//
+// Both are only populated for UpdateWorkflowOptions operations; other operation types default
+// to zero values.
+func validatePostResetOperationInputs(ctx context.Context,
+	postResetOperations []*workflowpb.PostResetOperation,
+	matchingClient matchingservice.MatchingServiceClient,
+	versionCache worker_versioning.VersionMembershipAndReactivationStatusCache,
+	taskQueue string,
+	namespaceID string) ([]bool, []int64, error) {
+	shouldSkipReactivationPerOp := make([]bool, len(postResetOperations))
+	revisionNumberPerOp := make([]int64, len(postResetOperations))
+	for i, operation := range postResetOperations {
+		switch op := operation.GetVariant().(type) {
+		case *workflowpb.PostResetOperation_UpdateWorkflowOptions_:
+			opts := op.UpdateWorkflowOptions.GetWorkflowExecutionOptions()
+			shouldSkipReactivation, revisionNumber, err := worker_versioning.ValidateVersioningOverrideAndGetReactivationEligibility(ctx, opts.GetVersioningOverride(), matchingClient, versionCache, taskQueue, enumspb.TASK_QUEUE_TYPE_WORKFLOW, namespaceID)
+			if err != nil {
+				return nil, nil, err
+			}
+			shouldSkipReactivationPerOp[i] = shouldSkipReactivation
+			revisionNumberPerOp[i] = revisionNumber
+		default:
+			return nil, nil, serviceerror.NewInvalidArgumentf("unsupported post reset operation: %T", op)
+		}
+	}
+	return shouldSkipReactivationPerOp, revisionNumberPerOp, nil
+}

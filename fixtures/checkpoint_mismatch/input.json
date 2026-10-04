@@ -1,0 +1,17 @@
+{
+  "scenario": "checkpoint_mismatch",
+  "description": "Recovery finds checkpoint context hash differs from current verification context",
+  "contract": {
+    "objective": "Fix KVDB memory leak",
+    "effect_class": "staged",
+    "criteria": [
+      {"id": "c-tests", "name": "tests", "kind": "test_pass", "is_blocking": true}
+    ]
+  },
+  "original_context_hash": "sha256:abc123",
+  "recovery_context_hash": "sha256:def456",
+  "expected": {
+    "checkpoint_match": false,
+    "action": "revalidate_all_evidence"
+  }
+}

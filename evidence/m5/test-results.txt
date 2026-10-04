@@ -1,0 +1,88 @@
+
+running 57 tests
+test attempt_decision::tests::environment_error_freezes ... ok
+test attempt_decision::tests::incomplete_budget_depleted_escalates ... ok
+test attempt_decision::tests::incomplete_within_budget_retries ... ok
+test attempt_decision::tests::success_with_staged_commits ... ok
+test attempt_decision::tests::success_with_irreversible_confirms ... ok
+test canonical::tests::different_domains_different_hash ... ok
+test canonical::tests::deterministic_hash_same_input ... ok
+test canonical::tests::infinity_number_rejected_by_serde_json ... ok
+test canonical::tests::different_inputs_different_hash ... ok
+test canonical::tests::nan_number_rejected_by_serde_json ... ok
+test canonical::tests::sorted_keys_vs_insertion_order ... ok
+test canonical::tests::string_containing_nan_is_accepted ... ok
+test checkpoint::tests::checkpoint_binding_roundtrip ... ok
+test canonical::tests::valid_float_accepted ... ok
+test effect_classifier::tests::critical_risk_escalates_to_irreversible ... ok
+test checkpoint::tests::context_hash_deterministic ... ok
+test effect_classifier::tests::deploy_is_irreversible ... ok
+test effect_classifier::tests::declared_class_cannot_downgrade ... ok
+test effect_classifier::tests::drop_table_without_transaction_is_irreversible ... ok
+test effect_classifier::tests::file_write_is_staged ... ok
+test effect_classifier::tests::file_write_underscore_is_staged ... ok
+test effect_classifier::tests::more_restrictive_ordering ... ok
+test effect_classifier::tests::read_is_readonly ... ok
+test effect_classifier::tests::rewrite_not_matched_as_write ... ok
+test effect_classifier::tests::send_email_is_irreversible ... ok
+test effect_classifier::tests::sql_with_begin_is_transactional ... ok
+test effect_classifier::tests::thread_not_matched_as_read ... ok
+test evidence_chain::tests::chain_append_and_verify ... ok
+test effect_classifier::tests::unknown_capability_is_irreversible ... ok
+test reduction::tests::all_satisfied_passes ... ok
+test evidence_chain::tests::chain_sealed_no_append ... ok
+test invalidation::tests::verifier_change_invalidates ... ok
+test reduction::tests::non_blocking_unsatisfied_still_passes ... ok
+test reduction::tests::no_evidence_no_success ... ok
+test reduction::tests::property_cross_criterion_evidence_independence ... ok
+test evidence_chain::tests::tampered_evidence_detected ... ok
+test invalidation::tests::no_change_valid ... ok
+test invalidation::tests::cross_attempt_evidence_rejected ... ok
+test reduction::tests::blocking_unsatisfied_fails ... ok
+test reduction::tests::property_evidence_for_unknown_criterion_ignored ... ok
+test invalidation::tests::code_change_invalidates ... ok
+test reduction::tests::property_no_criteria_no_problem ... ok
+test reduction::tests::duplicate_evidence_no_increase ... ok
+test invalidation::tests::requirement_change_invalidates ... ok
+test session_decision::tests::finish_with_all_criteria_met_is_success ... ok
+test session_decision::tests::budget_depleted_but_success_is_still_success ... ok
+test replay::tests::different_inputs_different_replay_hash ... ok
+test settlement::tests::environment_error_freezes ... ok
+test session_decision::tests::crash_is_environment_error_not_failed ... ok
+test settlement::tests::compensatable_incomplete_compensates ... ok
+test session_decision::tests::stuck_with_failure_is_escalated ... ok
+test settlement::tests::irreversible_failed_escalates ... ok
+test settlement::tests::irreversible_success_confirms ... ok
+test settlement::tests::staged_success_commits ... ok
+test settlement::tests::staged_incomplete_with_blocking_rolls_back ... ok
+test settlement::tests::pure_success_no_settlement ... ok
+test replay::tests::replay_hash_deterministic ... ok
+
+test result: ok. 57 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 21 tests
+test builtin_bridge::tests::builtin_gate_irreversible_requires_approval ... ok
+test builtin_bridge::tests::builtin_gate_file_write_allowed ... ok
+test builtin_bridge::tests::confirm_on_failure_is_passed_through ... ok
+test builtin_bridge::tests::monotonic_tightening_commit_on_failure_escalates ... ok
+test builtin_bridge::tests::monotonic_tightening_commit_on_success_passes ... ok
+test builtin_bridge::tests::rollback_is_always_passed_through ... ok
+test builtin_bridge::tests::shadow_observer_classifies_correctly ... ok
+test builtin_bridge::tests::fault_injection_persist_failure_still_returns_decision ... ok
+test builtin_bridge::tests::full_finalization_pipeline_with_mock_stores ... ok
+test builtin_bridge::tests::stub_finalization_preserves_budget ... ok
+test builtin_bridge::tests::shadow_unknown_tool_is_irreversible ... ok
+test builtin_bridge::tests::stub_finalization_returns_success ... ok
+test finalizer::tests::budget_depleted_success_independent_dimensions ... ok
+test finalizer::tests::crashed_exit_environment_error_escalated ... ok
+test finalizer::tests::empty_evidence_rejects_success ... ok
+test finalizer::tests::duplicate_finalize_idempotent ... ok
+test finalizer::tests::idempotency_single_persist_single_event ... ok
+test finalizer::tests::persist_failure_must_not_commit ... ok
+test finalizer::tests::real_evidence_success_committed ... ok
+test finalizer::tests::unsatisfied_criterion_failed_continuing ... ok
+test finalizer::tests::provider_stop_with_valid_evidence_success ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

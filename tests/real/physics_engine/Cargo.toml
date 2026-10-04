@@ -1,0 +1,7 @@
+[package]
+name = "physics-engine"
+version = "0.1.0"
+edition = "2021"
+description = "General-purpose physics simulation kernel for OntoAssure E2E testing"
+
+[dependencies]

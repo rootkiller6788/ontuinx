@@ -1,0 +1,16 @@
+{
+  "scenario": "replay_mismatch",
+  "description": "Replay of a successful run produces different evidence hash — tampering detected",
+  "original_run": {
+    "evidence_hash": "sha256:aaa111",
+    "task_outcome": "success"
+  },
+  "replayed_run": {
+    "evidence_hash": "sha256:bbb222",
+    "task_outcome": "success"
+  },
+  "expected": {
+    "replay_match": false,
+    "tampering_detected": true
+  }
+}

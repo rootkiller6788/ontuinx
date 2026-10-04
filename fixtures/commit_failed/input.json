@@ -1,0 +1,20 @@
+{
+  "scenario": "commit_failed",
+  "description": "Evidence valid and COMMIT decision reached, but publish to OntoRuntime fails",
+  "contract": {
+    "objective": "Refactor KVDB init",
+    "effect_class": "staged",
+    "criteria": [
+      {"id": "c-tests", "name": "tests", "kind": "test_pass", "is_blocking": true}
+    ]
+  },
+  "evidence": [
+    {"criterion_id": "c-tests", "kind": "test_output", "payload": {"passed": true, "tests": 9}}
+  ],
+  "settlement_decision": "commit",
+  "publish_error": "event_store_write_failed",
+  "expected": {
+    "recovery_action": "retry_publish_with_idempotency_key",
+    "must_not_double_publish": true
+  }
+}

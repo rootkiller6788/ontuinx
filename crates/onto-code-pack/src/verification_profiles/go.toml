@@ -1,0 +1,25 @@
+profile_id = "onto.code.go.v1"
+description = "OntoOS Go code verification profile"
+
+required_verifiers = [
+  "go-build",
+  "go-test",
+  "go-vet",
+  "golangci-lint",
+  "ironclaw-semantic"
+]
+
+[enforcement]
+build = "required"
+test = "required"
+lint = "required"
+semantic = "advisory"
+
+[evidence]
+require_snapshot_binding = true
+require_location_resolution = true
+allow_unresolved_semantic_findings = false
+
+[budget]
+max_verifier_calls = 25
+max_tokens_per_semantic_unit = 4000

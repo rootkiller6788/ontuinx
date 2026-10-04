@@ -1,0 +1,32 @@
+[package]
+name = "onto-pack"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT OR Apache-2.0"
+description = "Onto Pack SDK + Code Reference — build, test, lint verifiers for software projects"
+
+[dependencies]
+onto-assurance-types = { path = "../onto-assurance-types" }
+onto-assurance-core = { path = "../onto-assurance-core" }
+onto-assurance-runtime = { path = "../onto-assurance-runtime" }
+onto-pack-sdk = { path = "../onto-pack-sdk" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-trait = "0.1"
+thiserror = "2"
+sha2 = "0.10"
+hex = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
+
+[features]
+test-support = []
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt"] }
+chrono = { version = "0.4", features = ["serde"] }
+serde_json = "1"
+
+[lints]
+workspace = true

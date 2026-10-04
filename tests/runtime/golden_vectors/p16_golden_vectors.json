@@ -1,0 +1,191 @@
+{
+  "protocol_version": 1,
+  "description": "P16 Golden Vectors \u2014 Go MUST produce identical hashes and reject tampered envelopes.",
+  "hash_algorithm": "SHA-256 of colon-separated ordered fields",
+  "vectors": [
+    {
+      "name": "committed",
+      "description": "FinalizeCandidate \u2192 Committed. Go MUST accept.",
+      "envelope": {
+        "schema_version": 1,
+        "flow_id": "flow-golden-1",
+        "work_item_id": "wi-golden-1",
+        "loop_id": "loop-golden-1",
+        "execution_generation": 1,
+        "request_binding_hash": "a1b2c3d4e5f6a7b8",
+        "reported_terminal_state": "Committed",
+        "decision_id": "dec-golden-001",
+        "decision_hash": "d1e2f3a4b5c6d7e8",
+        "evidence_bundle_ref": "evidence/golden-1",
+        "settlement_receipt_ref": "receipt-golden-001",
+        "output_checkpoint_hash": "ckpt-golden-001",
+        "outcome_binding_hash": "e8db65b499e2aba1",
+        "total_attempts": 1,
+        "terminal_reason": "Committed: receipt=receipt-golden-001",
+        "canonical_digest": "SHA-256 of all fields in order"
+      },
+      "expected": {
+        "go_accepts": true
+      }
+    },
+    {
+      "name": "escalated",
+      "description": "Escalated \u2014 authoritative block. Go MUST accept but not treat as success.",
+      "envelope": {
+        "schema_version": 1,
+        "flow_id": "flow-golden-2",
+        "work_item_id": "wi-golden-2",
+        "loop_id": "loop-golden-2",
+        "execution_generation": 1,
+        "request_binding_hash": "b2c3d4e5f6a7b8c9",
+        "reported_terminal_state": "Escalated",
+        "decision_id": "dec-golden-002",
+        "decision_hash": "e2f3a4b5c6d7e8f9",
+        "evidence_bundle_ref": null,
+        "settlement_receipt_ref": null,
+        "output_checkpoint_hash": "ckpt-golden-002",
+        "outcome_binding_hash": "f35edead9cf99ab4",
+        "total_attempts": 2,
+        "terminal_reason": "onto_assurance_escalated",
+        "canonical_digest": "SHA-256 of all fields in order"
+      },
+      "expected": {
+        "go_accepts": true,
+        "is_success": false
+      }
+    },
+    {
+      "name": "tampered_terminal_state",
+      "description": "Receipt=Escalated but envelope=Committed \u2192 Go MUST reject.",
+      "envelope": {
+        "schema_version": 1,
+        "flow_id": "flow-golden-3",
+        "work_item_id": "wi-golden-3",
+        "loop_id": "loop-golden-3",
+        "execution_generation": 1,
+        "request_binding_hash": "c3d4e5f6a7b8c9d0",
+        "reported_terminal_state": "Committed",
+        "decision_id": "dec-golden-003",
+        "decision_hash": "f3a4b5c6d7e8f9a0",
+        "evidence_bundle_ref": null,
+        "settlement_receipt_ref": "receipt-golden-003",
+        "output_checkpoint_hash": "ckpt-golden-003",
+        "outcome_binding_hash": "e0621da77d622685",
+        "total_attempts": 1,
+        "terminal_reason": "onto_assurance_escalated",
+        "canonical_digest": "SHA-256 of all fields in order",
+        "_attack_note": "reported_terminal_state=Committed but terminal_reason shows Escalated \u2014 digest mismatch proves tampering"
+      },
+      "expected": {
+        "go_accepts": false,
+        "reject_reason": "digest_mismatch_or_state_inconsistency"
+      }
+    },
+    {
+      "name": "tampered_digest",
+      "description": "outcome_binding_hash modified \u2192 Go MUST reject.",
+      "envelope": {
+        "schema_version": 1,
+        "flow_id": "flow-golden-4",
+        "work_item_id": "wi-golden-4",
+        "loop_id": "loop-golden-4",
+        "execution_generation": 1,
+        "request_binding_hash": "d4e5f6a7b8c9d0e1",
+        "reported_terminal_state": "Committed",
+        "decision_id": "dec-golden-004",
+        "decision_hash": "a4b5c6d7e8f9a0b1",
+        "evidence_bundle_ref": "evidence/golden-4",
+        "settlement_receipt_ref": "receipt-golden-004",
+        "output_checkpoint_hash": "ckpt-golden-004",
+        "outcome_binding_hash": "0000000000000000",
+        "total_attempts": 1,
+        "terminal_reason": "Committed",
+        "canonical_digest": "SHA-256 of all fields in order",
+        "_attack_note": "outcome_binding_hash was replaced with zeros \u2014 must not match computed hash"
+      },
+      "expected": {
+        "go_accepts": false,
+        "reject_reason": "digest_mismatch"
+      }
+    },
+    {
+      "name": "unknown_schema_version",
+      "description": "schema_version=99 \u2192 Go MUST reject.",
+      "envelope": {
+        "schema_version": 99,
+        "flow_id": "flow-golden-5",
+        "work_item_id": "wi-golden-5",
+        "loop_id": "loop-golden-5",
+        "execution_generation": 1,
+        "request_binding_hash": "e5f6a7b8c9d0e1f2",
+        "reported_terminal_state": "Committed",
+        "decision_id": "dec-golden-005",
+        "decision_hash": "b5c6d7e8f9a0b1c2",
+        "evidence_bundle_ref": null,
+        "settlement_receipt_ref": null,
+        "output_checkpoint_hash": null,
+        "outcome_binding_hash": "fb008cfe3550afb6",
+        "total_attempts": 1,
+        "terminal_reason": "Committed",
+        "canonical_digest": "SHA-256 of all fields in order"
+      },
+      "expected": {
+        "go_accepts": false,
+        "reject_reason": "unsupported_schema_version"
+      }
+    },
+    {
+      "name": "missing_receipt_on_committed",
+      "description": "Committed without receipt \u2192 Go MUST reject.",
+      "envelope": {
+        "schema_version": 1,
+        "flow_id": "flow-golden-6",
+        "work_item_id": "wi-golden-6",
+        "loop_id": "loop-golden-6",
+        "execution_generation": 1,
+        "request_binding_hash": "f6a7b8c9d0e1f2a3",
+        "reported_terminal_state": "Committed",
+        "decision_id": "dec-golden-006",
+        "decision_hash": "c6d7e8f9a0b1c2d3",
+        "evidence_bundle_ref": null,
+        "settlement_receipt_ref": null,
+        "output_checkpoint_hash": "ckpt-golden-006",
+        "outcome_binding_hash": "f9e36176dca37f03",
+        "total_attempts": 1,
+        "terminal_reason": "Committed",
+        "canonical_digest": "SHA-256 of all fields in order"
+      },
+      "expected": {
+        "go_accepts": false,
+        "reject_reason": "missing_receipt"
+      }
+    },
+    {
+      "name": "request_binding_mismatch",
+      "description": "request_binding_hash doesn't match recomputed \u2192 Go MUST reject.",
+      "envelope": {
+        "schema_version": 1,
+        "flow_id": "flow-golden-7",
+        "work_item_id": "wi-golden-7",
+        "loop_id": "loop-golden-7",
+        "execution_generation": 2,
+        "request_binding_hash": "0000000000000000",
+        "reported_terminal_state": "Escalated",
+        "decision_id": null,
+        "decision_hash": null,
+        "evidence_bundle_ref": null,
+        "settlement_receipt_ref": null,
+        "output_checkpoint_hash": null,
+        "outcome_binding_hash": "deadbeefdeadbeef",
+        "total_attempts": 0,
+        "terminal_reason": "request tampered",
+        "canonical_digest": "SHA-256 of all fields in order",
+        "_attack_note": "execution_generation=2 but binding_hash=zeros \u2014 deliberately mismatched"
+      },
+      "expected": {
+        "go_accepts": false,
+        "reject_reason": "binding_hash_mismatch"
+      }
+    }
+  ]
+}

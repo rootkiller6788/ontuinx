@@ -1,0 +1,154 @@
+name: Features Integration
+
+on: # rebuild any PRs and main branch changes
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions: read-all
+
+concurrency: # Auto-cancel existing runs in the PR when a new commit is pushed
+  group: ${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  build-docker-image:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Build binaries
+        uses: ./.github/actions/build-binaries
+        with:
+          snapshot: true
+          single-arch: amd64
+
+      - name: Build Docker images
+        id: build-docker
+        uses: ./.github/actions/build-docker-images
+        with:
+          push: false
+          tag-latest: false
+          platform: linux/amd64
+          load: true
+
+      - name: Save Docker image as artifact
+        env:
+          BRANCH_TAG: ${{ steps.build-docker.outputs.branch-tag }}
+        run: |
+          docker save "temporaliotest/server:${BRANCH_TAG}" -o /tmp/temporal-server.tar
+          docker save "temporaliotest/admin-tools:${BRANCH_TAG}" -o /tmp/temporal-admin-tools.tar
+          echo "${BRANCH_TAG}" > /tmp/image_tag
+
+      - name: Prepare artifact
+        working-directory: ${{ github.workspace }}
+        run: |
+          # Upload-artifact has no good way to flatten paths, so we need to move the compose file
+          # to avoid some disgustingly long inner path inside the artifact zip.
+          cp ./develop/docker-compose/docker-compose.yml /tmp/docker-compose.yml
+
+      - name: Upload Docker artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: temporal-server-docker
+          path: |
+            /tmp/temporal-server.tar
+            /tmp/temporal-admin-tools.tar
+            /tmp/image_tag
+            /tmp/docker-compose.yml
+
+          retention-days: 7
+
+  feature-tests-ts:
+    needs: build-docker-image
+    uses: temporalio/features/.github/workflows/typescript.yaml@main
+    with:
+      # This field is not actually used by these workflow if docker-image-artifact-name
+      # is set, but it's marked as required, so supply some string.
+      version: __latest_features_docker_image__
+      version-is-repo-ref: false
+      docker-image-artifact-name: temporal-server-docker
+
+  feature-tests-go:
+    needs: build-docker-image
+    uses: temporalio/features/.github/workflows/go.yaml@main
+    with:
+      version: __latest_features_docker_image__
+      version-is-repo-ref: false
+      docker-image-artifact-name: temporal-server-docker
+
+  feature-tests-go-chasm-scheduler:
+    needs: build-docker-image
+    uses: temporalio/features/.github/workflows/go.yaml@main
+    with:
+      version: __latest_features_docker_image__
+      version-is-repo-ref: false
+      docker-image-artifact-name: temporal-server-docker
+      dynamic-config-values: |
+        history.enableTransitionHistory:
+          - value: true
+        history.enableChasm:
+          - value: true
+        history.enableCHASMSchedulerCreation:
+          - value: true
+
+  feature-tests-python:
+    needs: build-docker-image
+    uses: temporalio/features/.github/workflows/python.yaml@main
+    with:
+      version: __latest_features_docker_image__
+      version-is-repo-ref: false
+      docker-image-artifact-name: temporal-server-docker
+
+  feature-tests-java:
+    needs: build-docker-image
+    uses: temporalio/features/.github/workflows/java.yaml@main
+    with:
+      version: __latest_features_docker_image__
+      version-is-repo-ref: false
+      docker-image-artifact-name: temporal-server-docker
+
+  feature-tests-dotnet:
+    needs: build-docker-image
+    uses: temporalio/features/.github/workflows/dotnet.yaml@main
+    with:
+      version: __latest_features_docker_image__
+      version-is-repo-ref: false
+      docker-image-artifact-name: temporal-server-docker
+
+  feature-tests-ruby:
+    needs: build-docker-image
+    uses: temporalio/features/.github/workflows/ruby.yaml@main
+    with:
+      version: __latest_features_docker_image__
+      version-is-repo-ref: false
+      docker-image-artifact-name: temporal-server-docker
+
+  feature-tests-status:
+    name: Tests Status
+    needs:
+      - feature-tests-ts
+      - feature-tests-go
+      - feature-tests-go-chasm-scheduler
+      - feature-tests-python
+      - feature-tests-java
+      - feature-tests-dotnet
+      - feature-tests-ruby
+    runs-on: ubuntu-latest
+    if: always()
+    env:
+      RESULTS: ${{ toJSON(needs.*.result) }}
+    steps:
+      - name: Check results
+        run: |
+          if [[ -n $(echo "$RESULTS" | jq '.[] | select (. != "success")') ]]; then
+            exit 1
+          fi

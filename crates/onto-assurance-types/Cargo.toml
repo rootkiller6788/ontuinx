@@ -1,0 +1,16 @@
+[package]
+name = "onto-assurance-types"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT OR Apache-2.0"
+description = "Onto Assurance Kernel — shared types: enums, IDs, contracts, evidence, decisions"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+[lints]
+workspace = true

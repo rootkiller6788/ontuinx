@@ -1,0 +1,1 @@
+// Scheduler removed — use PipelineManager

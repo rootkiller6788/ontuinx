@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.10)
+project(KVConfig C)
+set(CMAKE_C_STANDARD 11)
+add_library(kvconfig kv_config.c)
+add_executable(test_kv_config test_kv_config.c)
+target_link_libraries(test_kv_config kvconfig)
+enable_testing()
+add_test(NAME kv_test COMMAND test_kv_config)

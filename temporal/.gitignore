@@ -1,0 +1,50 @@
+.tmp/
+.bin/
+.stamp/
+
+.idea/
+.vscode/settings.json
+.vscode
+*.code-workspace
+.DS_Store
+.coverage
+.testoutput
+
+*.out
+*.test
+*.xml
+!tools/testrunner/testdata/*.xml
+*.swp
+/*.iml
+*.cov
+*.html
+/test.log
+
+# Executables produced by temporal repo
+/temporal-*
+/tctl*
+/tdbg
+/fairsim
+
+# proto images
+/proto/image.bin
+/proto/chasm.bin
+# api+google proto dependencies
+/proto/api.binpb
+
+# Goreleaser
+/dist
+
+# direnv
+.envrc
+
+# Git SPR: https://github.com/ejoffe/spr
+.spr.yml
+
+/proto.tmp
+
+**/.venv/
+**/.ruff_cache/
+
+# Ignoring AI agent files
+.agents/

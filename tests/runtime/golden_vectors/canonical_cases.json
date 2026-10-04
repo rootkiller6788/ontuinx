@@ -1,0 +1,166 @@
+{
+  "protocol_version": 1,
+  "description": "Cross-language golden vectors. Go and Rust MUST produce identical hashes for each case.",
+  "hash_algorithm": "SHA-256 of canonical UTF-8 string with colon-separated ordered fields",
+  "cases": [
+    {
+      "id": "GV-1",
+      "name": "simple_single_attempt",
+      "input": {
+        "flow_id": "gv-flow-1",
+        "work_item_id": "gv-wi-1",
+        "loop_id": "gv-loop-1-gen1",
+        "task_spec_ref": "spec/build-service",
+        "contract_ref": "contract/default",
+        "policy_ref": "policy/default",
+        "input_artifact_refs": "artifact/a1",
+        "budget_grant_ref": "grant-1",
+        "budget_grant_hash": "grant-hash-1",
+        "execution_generation": 1
+      },
+      "expected": {
+        "request_binding_hash": "to be computed by Rust and Go independently",
+        "identity_key": "gv-flow-1:gv-wi-1:gen1"
+      }
+    },
+    {
+      "id": "GV-2",
+      "name": "two_attempt_convergence",
+      "input": {
+        "flow_id": "gv-flow-2",
+        "work_item_id": "gv-wi-2",
+        "loop_id": "gv-loop-2-gen2",
+        "task_spec_ref": "spec/fix-bug",
+        "contract_ref": "contract/strict",
+        "policy_ref": "policy/default",
+        "input_artifact_refs": "",
+        "budget_grant_ref": "grant-2",
+        "budget_grant_hash": "grant-hash-2",
+        "execution_generation": 2
+      },
+      "expected": {
+        "request_binding_hash": "to be computed",
+        "identity_key": "gv-flow-2:gv-wi-2:gen2"
+      }
+    },
+    {
+      "id": "GV-3",
+      "name": "escalated_loop",
+      "input": {
+        "flow_id": "gv-flow-3",
+        "work_item_id": "gv-wi-3",
+        "loop_id": "gv-loop-3-gen1",
+        "task_spec_ref": "spec/escalated-task",
+        "contract_ref": "contract/default",
+        "policy_ref": "policy/default",
+        "input_artifact_refs": "artifact/x",
+        "budget_grant_ref": "grant-3",
+        "budget_grant_hash": "grant-hash-3",
+        "execution_generation": 1
+      },
+      "expected": {
+        "reported_terminal_state": "escalated",
+        "allows_downstream": false,
+        "is_terminal": true
+      }
+    },
+    {
+      "id": "GV-4",
+      "name": "unicode_task_spec",
+      "input": {
+        "flow_id": "gv-flow-4",
+        "work_item_id": "gv-wi-4",
+        "loop_id": "gv-loop-4-gen1",
+        "task_spec_ref": "spec/生成レポート",
+        "contract_ref": "contract/默认",
+        "policy_ref": "policy/standard",
+        "input_artifact_refs": "",
+        "budget_grant_ref": "grant-4",
+        "budget_grant_hash": "grant-hash-4",
+        "execution_generation": 1
+      },
+      "expected": {
+        "note": "Unicode fields must produce deterministic, identical hashes in Go and Rust"
+      }
+    },
+    {
+      "id": "GV-5",
+      "name": "empty_input_artifacts_vs_absent",
+      "input": {
+        "flow_id": "gv-flow-5",
+        "work_item_id": "gv-wi-5",
+        "loop_id": "gv-loop-5-gen1",
+        "task_spec_ref": "spec/task",
+        "contract_ref": "contract/c",
+        "policy_ref": "policy/p",
+        "input_artifact_refs": "",
+        "budget_grant_ref": "grant-5",
+        "budget_grant_hash": "grant-hash-5",
+        "execution_generation": 1
+      },
+      "expected": {
+        "note": "Empty array and absent field must hash differently. Empty = colon separator only."
+      }
+    },
+    {
+      "id": "GV-6",
+      "name": "integer_boundary_generation",
+      "input": {
+        "flow_id": "gv-flow-6",
+        "work_item_id": "gv-wi-6",
+        "loop_id": "gv-loop-6-gen18446744073709551615",
+        "task_spec_ref": "spec/task",
+        "contract_ref": "contract/c",
+        "policy_ref": "policy/p",
+        "input_artifact_refs": "a1,a2,a3",
+        "budget_grant_ref": "grant-6",
+        "budget_grant_hash": "grant-hash-6",
+        "execution_generation": 18446744073709551615
+      },
+      "expected": {
+        "note": "Max u64 generation must hash identically in Go and Rust"
+      }
+    },
+    {
+      "id": "GV-7",
+      "name": "schema_version_mismatch",
+      "input": {
+        "flow_id": "gv-flow-7",
+        "work_item_id": "gv-wi-7",
+        "loop_id": "gv-loop-7-gen1",
+        "task_spec_ref": "spec/task",
+        "contract_ref": "contract/c",
+        "policy_ref": "policy/p",
+        "input_artifact_refs": "",
+        "budget_grant_ref": "grant-7",
+        "budget_grant_hash": "grant-hash-7",
+        "execution_generation": 1
+      },
+      "expected": {
+        "note": "schema_version=2 should be rejected by v1 protocol handler"
+      }
+    },
+    {
+      "id": "GV-8",
+      "name": "outcome_binding_envelope",
+      "input": {
+        "flow_id": "gv-flow-8",
+        "work_item_id": "gv-wi-8",
+        "loop_id": "gv-loop-8-gen1",
+        "request_binding_hash": "abcd1234abcd1234",
+        "reported_terminal_state": "committed",
+        "decision_id": "dec-gv-8",
+        "decision_hash": "hash-gv-8",
+        "output_checkpoint_hash": "ckpt-gv-8",
+        "settlement_receipt_ref": "receipt-gv-8",
+        "output_artifact_refs": "out-1,out-2",
+        "execution_generation": 1,
+        "total_attempts": 2,
+        "schema_version": 1
+      },
+      "expected": {
+        "note": "Outcome binding hash must be identical in Go and Rust"
+      }
+    }
+  ]
+}

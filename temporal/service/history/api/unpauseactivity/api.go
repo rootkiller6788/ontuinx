@@ -1,0 +1,136 @@
+package unpauseactivity
+
+import (
+	"context"
+
+	"go.temporal.io/api/workflowservice/v1"
+	"go.temporal.io/server/api/historyservice/v1"
+	"go.temporal.io/server/common/definition"
+	"go.temporal.io/server/common/log/tag"
+	"go.temporal.io/server/common/metrics"
+	"go.temporal.io/server/common/namespace"
+	"go.temporal.io/server/service/history/api"
+	"go.temporal.io/server/service/history/consts"
+	historyi "go.temporal.io/server/service/history/interfaces"
+	"go.temporal.io/server/service/history/workflow"
+)
+
+func Invoke(
+	ctx context.Context,
+	request *historyservice.UnpauseActivityRequest,
+	shardContext historyi.ShardContext,
+	workflowConsistencyChecker api.WorkflowConsistencyChecker,
+) (resp *historyservice.UnpauseActivityResponse, retError error) {
+	var response *historyservice.UnpauseActivityResponse
+
+	err := api.GetAndUpdateWorkflowWithNew(
+		ctx,
+		nil,
+		definition.NewWorkflowKey(
+			request.NamespaceId,
+			request.GetFrontendRequest().GetExecution().GetWorkflowId(),
+			request.GetFrontendRequest().GetExecution().GetRunId(),
+		),
+		func(workflowLease api.WorkflowLease) (*api.UpdateWorkflowAction, error) {
+			mutableState := workflowLease.GetMutableState()
+			var err error
+			response, err = processUnpauseActivityRequest(shardContext, mutableState, request)
+			if err != nil {
+				return nil, err
+			}
+			return &api.UpdateWorkflowAction{
+				Noop:               false,
+				CreateWorkflowTask: false,
+			}, nil
+		},
+		nil,
+		shardContext,
+		workflowConsistencyChecker,
+	)
+
+	if err != nil {
+		return nil, err
+	}
+
+	frontendReq := request.GetFrontendRequest()
+	targetingMethod := "type"
+	if _, ok := frontendReq.GetActivity().(*workflowservice.UnpauseActivityRequest_Id); ok {
+		targetingMethod = "id"
+	} else if _, ok := frontendReq.GetActivity().(*workflowservice.UnpauseActivityRequest_UnpauseAll); ok {
+		targetingMethod = "unpause_all"
+	}
+	if ns, err := shardContext.GetNamespaceRegistry().GetNamespaceByID(namespace.ID(request.NamespaceId)); err == nil {
+		metrics.ActivityUnpause.With(shardContext.GetMetricsHandler().WithTags(
+			metrics.NamespaceTag(ns.Name().String()),
+			metrics.ActivityTargetingMethodTag(targetingMethod),
+		)).Record(1)
+	}
+
+	shardContext.GetLogger().Info("unpauseactivity: activity unpaused",
+		tag.WorkflowNamespaceID(request.GetNamespaceId()),
+		tag.WorkflowID(frontendReq.GetExecution().GetWorkflowId()),
+		tag.WorkflowRunID(frontendReq.GetExecution().GetRunId()),
+		tag.NewBoolTag("reset_attempts", frontendReq.GetResetAttempts()),
+		tag.NewBoolTag("reset_heartbeat", frontendReq.GetResetHeartbeat()),
+		tag.NewDurationTag("jitter", frontendReq.GetJitter().AsDuration()),
+	)
+
+	return response, err
+}
+
+func processUnpauseActivityRequest(
+	shardContext historyi.ShardContext,
+	mutableState historyi.MutableState,
+	request *historyservice.UnpauseActivityRequest,
+) (*historyservice.UnpauseActivityResponse, error) {
+
+	if !mutableState.IsWorkflowExecutionRunning() {
+		return nil, consts.ErrWorkflowCompleted
+	}
+	frontendRequest := request.GetFrontendRequest()
+	var activityIDs []string
+	switch a := frontendRequest.GetActivity().(type) {
+	case *workflowservice.UnpauseActivityRequest_Id:
+		activityIDs = append(activityIDs, a.Id)
+	case *workflowservice.UnpauseActivityRequest_Type:
+		activityType := a.Type
+		for _, ai := range mutableState.GetPendingActivityInfos() {
+			if ai.ActivityType.Name == activityType {
+				activityIDs = append(activityIDs, ai.ActivityId)
+			}
+		}
+	case *workflowservice.UnpauseActivityRequest_UnpauseAll:
+		for _, ai := range mutableState.GetPendingActivityInfos() {
+			activityIDs = append(activityIDs, ai.ActivityId)
+		}
+	}
+
+	if len(activityIDs) == 0 {
+		return nil, consts.ErrActivityNotFound
+	}
+
+	for _, activityId := range activityIDs {
+
+		ai, activityFound := mutableState.GetActivityByActivityID(activityId)
+
+		if !activityFound {
+			return nil, consts.ErrActivityNotFound
+		}
+
+		if !ai.Paused {
+			// do nothing
+			continue
+		}
+
+		if err := workflow.UnpauseActivity(
+			shardContext, mutableState, ai,
+			frontendRequest.GetResetAttempts(),
+			frontendRequest.GetResetHeartbeat(),
+			frontendRequest.GetJitter().AsDuration()); err != nil {
+			return nil, err
+		}
+
+	}
+
+	return &historyservice.UnpauseActivityResponse{}, nil
+}

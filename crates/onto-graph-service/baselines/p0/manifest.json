@@ -1,0 +1,30 @@
+{
+  "p0_baseline": {
+    "date": "2026-07-28",
+    "upstream": "DeusData/codebase-memory-mcp",
+    "license": "MIT (Copyright 2025 DeusData)",
+    "commit_sha": "3daac4447503b70520b1b25c2f07d071878fa79f",
+    "tag": "upstream-baseline",
+    "source": "extracted tarball (not cloned from remote)",
+    "pre-existing_changes": [
+      "pass_c_fnptr_bindings.c (691 lines): CallbackSlot + POINTS_TO edges",
+      "pipeline.c: sequential + parallel integration (4 call sites)",
+      "pipeline_incremental.c: incremental integration (2 call sites)",
+      "pipeline_internal.h: pass_c_fnptr_bindings declaration",
+      "Makefile.cbm: PIPELINE_SRCS addition"
+    ],
+    "build_status": "make -f Makefile.cbm cbm: PASS",
+    "binary_path": "build/c/codebase-memory-mcp",
+    "version": "dev"
+  },
+  "third_party_dependencies": [
+    {"name": "mimalloc", "license": "MIT", "vendor": "vendored/mimalloc/"},
+    {"name": "sqlite3", "license": "Public Domain", "vendor": "vendored/sqlite3/"},
+    {"name": "yyjson", "license": "MIT", "vendor": "vendored/yyjson/"},
+    {"name": "xxhash", "license": "BSD-2-Clause", "vendor": "vendored/xxhash/"},
+    {"name": "tre", "license": "BSD-2-Clause", "vendor": "vendored/tre/"},
+    {"name": "nomic-embed-code", "license": "Apache-2.0", "vendor": "vendored/nomic/"},
+    {"name": "tree-sitter", "license": "MIT", "vendor": "internal/cbm/vendored/ts_runtime/"},
+    {"name": "tree-sitter grammars (158+)", "license": "Various (mostly MIT)", "vendor": "internal/cbm/grammar_*.c"}
+  ]
+}

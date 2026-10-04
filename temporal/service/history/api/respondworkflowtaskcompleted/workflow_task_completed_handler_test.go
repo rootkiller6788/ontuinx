@@ -1,0 +1,787 @@
+package respondworkflowtaskcompleted
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"math/rand"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+	commandpb "go.temporal.io/api/command/v1"
+	commonpb "go.temporal.io/api/common/v1"
+	enumspb "go.temporal.io/api/enums/v1"
+	historypb "go.temporal.io/api/history/v1"
+	protocolpb "go.temporal.io/api/protocol/v1"
+	sdkpb "go.temporal.io/api/sdk/v1"
+	"go.temporal.io/api/serviceerror"
+	updatepb "go.temporal.io/api/update/v1"
+	workerpb "go.temporal.io/api/worker/v1"
+	clockspb "go.temporal.io/server/api/clock/v1"
+	persistencespb "go.temporal.io/server/api/persistence/v1"
+	"go.temporal.io/server/chasm"
+	chasmworkflow "go.temporal.io/server/chasm/lib/workflow"
+	"go.temporal.io/server/common/backoff"
+	"go.temporal.io/server/common/collection"
+	"go.temporal.io/server/common/dynamicconfig"
+	"go.temporal.io/server/common/effect"
+	"go.temporal.io/server/common/log"
+	"go.temporal.io/server/common/metrics"
+	"go.temporal.io/server/common/namespace"
+	"go.temporal.io/server/common/namespace/nsregistry"
+	"go.temporal.io/server/common/persistence"
+	"go.temporal.io/server/common/tasktoken"
+	"go.temporal.io/server/service/history/api"
+	"go.temporal.io/server/service/history/configs"
+	historyi "go.temporal.io/server/service/history/interfaces"
+	"go.temporal.io/server/service/history/tests"
+	"go.temporal.io/server/service/history/workflow"
+	"go.temporal.io/server/service/history/workflow/update"
+	"go.uber.org/mock/gomock"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/anypb"
+)
+
+func TestCommandProtocolMessage(t *testing.T) {
+	t.Parallel()
+
+	type testconf struct {
+		ms                    *historyi.MockMutableState
+		updates               update.Registry
+		handler               *workflowTaskCompletedHandler
+		chasmWorkflowRegistry *chasmworkflow.Registry
+	}
+
+	const defaultBlobSizeLimit = 1 * 1024 * 1024
+
+	msgCommand := func(msgID string) *commandpb.Command {
+		return &commandpb.Command{
+			CommandType: enumspb.COMMAND_TYPE_PROTOCOL_MESSAGE,
+			Attributes: &commandpb.Command_ProtocolMessageCommandAttributes{
+				ProtocolMessageCommandAttributes: &commandpb.ProtocolMessageCommandAttributes{
+					MessageId: msgID,
+				},
+			},
+		}
+	}
+
+	type setupOpts struct {
+		blobSizeLimit int
+		chasmEnabled  bool
+	}
+
+	setup := func(t *testing.T, out *testconf, opts setupOpts) {
+		ctrl := gomock.NewController(t)
+		shardCtx := historyi.NewMockShardContext(ctrl)
+		logger := log.NewNoopLogger()
+		metricsHandler := metrics.NoopMetricsHandler
+		out.ms = historyi.NewMockMutableState(ctrl)
+		out.ms.EXPECT().VisitUpdates(gomock.Any()).AnyTimes()
+		out.ms.EXPECT().GetNamespaceEntry().Return(tests.LocalNamespaceEntry).AnyTimes()
+		out.ms.EXPECT().GetCurrentVersion().Return(tests.LocalNamespaceEntry.FailoverVersion(tests.WorkflowID)).AnyTimes()
+
+		dcClient := dynamicconfig.StaticClient(nil)
+		if opts.chasmEnabled {
+			out.chasmWorkflowRegistry = chasmworkflow.NewRegistry()
+			mockCtx := &chasm.MockMutableContext{}
+			wf := chasmworkflow.NewWorkflow(mockCtx, chasm.MSPointer{})
+			out.ms.EXPECT().ChasmEnabled().Return(true).AnyTimes()
+			out.ms.EXPECT().EnsureChasmWorkflowComponent(gomock.Any()).AnyTimes()
+			out.ms.EXPECT().ChasmWorkflowComponent(gomock.Any()).Return(wf, mockCtx, nil)
+			dcClient = dynamicconfig.StaticClient(map[dynamicconfig.Key]any{
+				dynamicconfig.EnableChasm.Key(): true,
+			})
+		}
+
+		out.updates = update.NewRegistry(out.ms)
+		var effects effect.Buffer
+		col := dynamicconfig.NewCollection(dcClient, logger)
+		config := configs.NewConfig(col, 1)
+		mockMeta := persistence.NewMockMetadataManager(ctrl)
+		nsReg := nsregistry.NewRegistry(
+			mockMeta,
+			true,
+			"active",
+			func() time.Duration { return 1 * time.Hour },
+			dynamicconfig.GetBoolPropertyFn(false),
+			metricsHandler,
+			logger,
+			namespace.NewDefaultReplicationResolverFactory(),
+			nsregistry.DefaultNamespaceStateChanged,
+		)
+		out.handler = newWorkflowTaskCompletedHandler(
+			t.Name(), // identity
+			"",       // workerControlTaskQueue
+			123,      // workflowTaskCompletedID
+			out.ms,
+			out.updates,
+			&effects,
+			api.NewCommandAttrValidator(
+				nsReg,
+				config,
+				nil, // searchAttributesValidator
+			),
+			newWorkflowSizeChecker(
+				workflowSizeLimits{blobSizeLimitError: opts.blobSizeLimit},
+				out.ms,
+				nil, // searchAttributesValidator
+				metricsHandler,
+				logger,
+			),
+			logger,
+			nsReg,
+			metricsHandler,
+			config,
+			shardCtx,
+			nil, // searchattribute.MapperProvider
+			false,
+			nil,
+			out.chasmWorkflowRegistry,
+			nil,
+			nil,
+		)
+	}
+
+	t.Run("missing message ID", func(t *testing.T) {
+		var tc testconf
+		setup(t, &tc, setupOpts{blobSizeLimit: defaultBlobSizeLimit})
+		var (
+			command = msgCommand("") // blank is invalid
+		)
+
+		tc.ms.EXPECT().GetExecutionInfo().AnyTimes().Return(&persistencespb.WorkflowExecutionInfo{})
+
+		_, err := tc.handler.handleCommand(context.Background(), command, newMsgList())
+		require.NoError(t, err)
+		require.NotNil(t, tc.handler.workflowTaskFailedCause)
+		require.Equal(t,
+			enumspb.WORKFLOW_TASK_FAILED_CAUSE_BAD_UPDATE_WORKFLOW_EXECUTION_MESSAGE,
+			tc.handler.workflowTaskFailedCause.failedCause)
+	})
+
+	// Verifies that if user metadata is present in the command then it is passed through to the newly created event.
+	t.Run("Attach user metadata", func(t *testing.T) {
+		var tc testconf
+		setup(t, &tc, setupOpts{blobSizeLimit: defaultBlobSizeLimit})
+		msgID := t.Name() + "-message-id"
+		command := msgCommand(msgID)
+		startTimerCommandAttributes := &commandpb.StartTimerCommandAttributes{
+			TimerId: fmt.Sprintf("random-timer-id-%d", rand.Int63()),
+		}
+		command.UserMetadata = &sdkpb.UserMetadata{
+			Summary: &commonpb.Payload{
+				Metadata: map[string][]byte{"test_key": []byte(`test_val`)},
+				Data:     []byte(`Test summary Data`),
+			},
+			Details: &commonpb.Payload{
+				Metadata: map[string][]byte{"test_key": []byte(`test_val`)},
+				Data:     []byte(`Test Details Data`),
+			},
+		}
+
+		command.CommandType = enumspb.COMMAND_TYPE_START_TIMER
+		command.Attributes = &commandpb.Command_StartTimerCommandAttributes{
+			StartTimerCommandAttributes: startTimerCommandAttributes,
+		}
+
+		// mock an event creation.
+		event := &historypb.HistoryEvent{}
+		tc.ms.EXPECT().AddTimerStartedEvent(tc.handler.workflowTaskCompletedID, startTimerCommandAttributes).MaxTimes(1).Return(event, nil, nil)
+
+		_, err := tc.handler.handleCommand(context.Background(), command, newMsgList())
+		require.NoError(t, err)
+
+		// Verify that the user metadata is populated properly in the event object
+		require.Equal(t, event.UserMetadata, command.UserMetadata)
+	})
+
+	// Verifies that event group markers attached to a command are passed through to the newly created event.
+	t.Run("Attach event group markers", func(t *testing.T) {
+		var tc testconf
+		setup(t, &tc, setupOpts{blobSizeLimit: defaultBlobSizeLimit})
+		msgID := t.Name() + "-message-id"
+		command := msgCommand(msgID)
+		startTimerCommandAttributes := &commandpb.StartTimerCommandAttributes{
+			TimerId: fmt.Sprintf("random-timer-id-%d", rand.Int63()),
+		}
+		command.EventGroupMarkers = []*sdkpb.EventGroupMarker{
+			{
+				Variant: &sdkpb.EventGroupMarker_Label_{
+					Label: &sdkpb.EventGroupMarker_Label{
+						Id: "explicit-marker-id",
+						Label: &commonpb.Payload{
+							Metadata: map[string][]byte{"encoding": []byte("json/plain")},
+							Data:     []byte(`"payment"`),
+						},
+					},
+				},
+			},
+			{
+				Variant: &sdkpb.EventGroupMarker_InboundUpdate_{
+					InboundUpdate: &sdkpb.EventGroupMarker_InboundUpdate{
+						InboundUpdateId: "fire-update-1",
+					},
+				},
+			},
+		}
+
+		command.CommandType = enumspb.COMMAND_TYPE_START_TIMER
+		command.Attributes = &commandpb.Command_StartTimerCommandAttributes{
+			StartTimerCommandAttributes: startTimerCommandAttributes,
+		}
+
+		event := &historypb.HistoryEvent{}
+		tc.ms.EXPECT().AddTimerStartedEvent(tc.handler.workflowTaskCompletedID, startTimerCommandAttributes).MaxTimes(1).Return(event, nil, nil)
+
+		_, err := tc.handler.handleCommand(context.Background(), command, newMsgList())
+		require.NoError(t, err)
+
+		require.Equal(t, command.EventGroupMarkers, event.EventGroupMarkers)
+	})
+
+	// Verifies that an empty or nil EventGroupMarkers slice does not result in any unintended
+	// field being set on the produced history event.
+	t.Run("No event group markers leaves field unset", func(t *testing.T) {
+		var tc testconf
+		setup(t, &tc, setupOpts{blobSizeLimit: defaultBlobSizeLimit})
+		msgID := t.Name() + "-message-id"
+		command := msgCommand(msgID)
+		startTimerCommandAttributes := &commandpb.StartTimerCommandAttributes{
+			TimerId: fmt.Sprintf("random-timer-id-%d", rand.Int63()),
+		}
+		command.CommandType = enumspb.COMMAND_TYPE_START_TIMER
+		command.Attributes = &commandpb.Command_StartTimerCommandAttributes{
+			StartTimerCommandAttributes: startTimerCommandAttributes,
+		}
+
+		event := &historypb.HistoryEvent{}
+		tc.ms.EXPECT().AddTimerStartedEvent(tc.handler.workflowTaskCompletedID, startTimerCommandAttributes).MaxTimes(1).Return(event, nil, nil)
+
+		_, err := tc.handler.handleCommand(context.Background(), command, newMsgList())
+		require.NoError(t, err)
+
+		require.Nil(t, event.EventGroupMarkers)
+	})
+
+	// Verifies that the error is properly handled when event creation fails.
+	t.Run("Event creation failure", func(t *testing.T) {
+		var tc testconf
+		setup(t, &tc, setupOpts{blobSizeLimit: defaultBlobSizeLimit})
+		command := msgCommand(t.Name() + "-message-id")
+		completeWorkflowExecutionCommandAttributes := &commandpb.CompleteWorkflowExecutionCommandAttributes{
+			Result: &commonpb.Payloads{
+				Payloads: []*commonpb.Payload{},
+			},
+		}
+		command.UserMetadata = &sdkpb.UserMetadata{
+			Summary: &commonpb.Payload{},
+			Details: &commonpb.Payload{},
+		}
+
+		command.CommandType = enumspb.COMMAND_TYPE_COMPLETE_WORKFLOW_EXECUTION
+		command.Attributes = &commandpb.Command_CompleteWorkflowExecutionCommandAttributes{
+			CompleteWorkflowExecutionCommandAttributes: completeWorkflowExecutionCommandAttributes,
+		}
+
+		// mock a failed event creation.
+		event := &historypb.HistoryEvent{}
+		tc.ms.EXPECT().AddCompletedWorkflowEvent(tc.handler.workflowTaskCompletedID, completeWorkflowExecutionCommandAttributes, "").MaxTimes(1).Return(event, fmt.Errorf("FAIL"))
+		tc.ms.EXPECT().GetExecutionInfo().AnyTimes().Return(&persistencespb.WorkflowExecutionInfo{})
+		tc.ms.EXPECT().GetExecutionState().AnyTimes().Return(&persistencespb.WorkflowExecutionState{})
+		tc.ms.EXPECT().IsWorkflowExecutionRunning().AnyTimes().Return(true)
+		tc.ms.EXPECT().GetCronBackoffDuration().AnyTimes().Return(backoff.NoBackoff)
+
+		_, err := tc.handler.handleCommand(context.Background(), command, newMsgList())
+		require.Error(t, err)
+
+		// Verify that the event is discarded anduser metadata is not attached to the event.
+		require.Nil(t, event.UserMetadata)
+	})
+
+	t.Run("message not found", func(t *testing.T) {
+		var tc testconf
+		setup(t, &tc, setupOpts{blobSizeLimit: defaultBlobSizeLimit})
+		var (
+			command = msgCommand("valid_but_not_found_msg_id")
+		)
+
+		tc.ms.EXPECT().GetExecutionInfo().AnyTimes().Return(&persistencespb.WorkflowExecutionInfo{})
+
+		_, err := tc.handler.handleCommand(context.Background(), command, newMsgList())
+		require.NoError(t, err)
+		require.NotNil(t, tc.handler.workflowTaskFailedCause)
+		require.Equal(t,
+			enumspb.WORKFLOW_TASK_FAILED_CAUSE_BAD_UPDATE_WORKFLOW_EXECUTION_MESSAGE,
+			tc.handler.workflowTaskFailedCause.failedCause)
+	})
+
+	t.Run("message too large", func(t *testing.T) {
+		var tc testconf
+		t.Log("setting max blob size to zero")
+		setup(t, &tc, setupOpts{blobSizeLimit: 0})
+		var (
+			msgID   = t.Name() + "-message-id"
+			command = msgCommand(msgID) // blank is invalid
+			msg     = &protocolpb.Message{
+				Id:                 msgID,
+				ProtocolInstanceId: "does_not_matter",
+				Body:               mustMarshalAny(t, &anypb.Any{}),
+			}
+		)
+
+		tc.ms.EXPECT().GetExecutionInfo().AnyTimes().Return(&persistencespb.WorkflowExecutionInfo{})
+		tc.ms.EXPECT().GetExecutionState().AnyTimes().Return(&persistencespb.WorkflowExecutionState{})
+
+		_, err := tc.handler.handleCommand(context.Background(), command, newMsgList(msg))
+		require.NoError(t, err)
+		require.NotNil(t, tc.handler.workflowTaskFailedCause)
+		require.Equal(t,
+			enumspb.WORKFLOW_TASK_FAILED_CAUSE_BAD_UPDATE_WORKFLOW_EXECUTION_MESSAGE,
+			tc.handler.workflowTaskFailedCause.failedCause)
+		require.ErrorContains(t, tc.handler.workflowTaskFailedCause.causeErr, "exceeds size limit")
+	})
+
+	t.Run("message for unsupported protocol", func(t *testing.T) {
+		var tc testconf
+		setup(t, &tc, setupOpts{blobSizeLimit: defaultBlobSizeLimit})
+		var (
+			msgID   = t.Name() + "-message-id"
+			command = msgCommand(msgID) // blank is invalid
+			msg     = &protocolpb.Message{
+				Id:                 msgID,
+				ProtocolInstanceId: "does_not_matter",
+				Body:               mustMarshalAny(t, &anypb.Any{}),
+			}
+		)
+
+		tc.ms.EXPECT().GetExecutionInfo().AnyTimes().Return(&persistencespb.WorkflowExecutionInfo{})
+		tc.ms.EXPECT().GetExecutionState().AnyTimes().Return(&persistencespb.WorkflowExecutionState{})
+
+		_, err := tc.handler.handleCommand(context.Background(), command, newMsgList(msg))
+		require.NoError(t, err)
+		require.NotNil(t, tc.handler.workflowTaskFailedCause)
+		require.Equal(t,
+			enumspb.WORKFLOW_TASK_FAILED_CAUSE_BAD_UPDATE_WORKFLOW_EXECUTION_MESSAGE,
+			tc.handler.workflowTaskFailedCause.failedCause)
+		var invalidArg *serviceerror.InvalidArgument
+		require.ErrorAs(t, tc.handler.workflowTaskFailedCause.causeErr, &invalidArg)
+		require.ErrorContains(t, tc.handler.workflowTaskFailedCause.causeErr, "protocol type")
+	})
+
+	t.Run("update not found", func(t *testing.T) {
+		var tc testconf
+		setup(t, &tc, setupOpts{blobSizeLimit: defaultBlobSizeLimit})
+		var (
+			msgID   = t.Name() + "-message-id"
+			command = msgCommand(msgID) // blank is invalid
+			msg     = &protocolpb.Message{
+				Id:                 msgID,
+				ProtocolInstanceId: "will not be found",
+				Body:               mustMarshalAny(t, &updatepb.Acceptance{}),
+			}
+		)
+
+		tc.ms.EXPECT().GetExecutionInfo().AnyTimes().Return(&persistencespb.WorkflowExecutionInfo{})
+		tc.ms.EXPECT().GetExecutionState().AnyTimes().Return(&persistencespb.WorkflowExecutionState{})
+		tc.ms.EXPECT().GetUpdateOutcome(gomock.Any(), "will not be found").Return(nil, serviceerror.NewNotFound(""))
+
+		_, err := tc.handler.handleCommand(context.Background(), command, newMsgList(msg))
+		require.NoError(t, err)
+		require.NotNil(t, tc.handler.workflowTaskFailedCause)
+		require.Equal(t,
+			enumspb.WORKFLOW_TASK_FAILED_CAUSE_BAD_UPDATE_WORKFLOW_EXECUTION_MESSAGE,
+			tc.handler.workflowTaskFailedCause.failedCause)
+		var notfound *serviceerror.NotFound
+		require.ErrorAs(t, tc.handler.workflowTaskFailedCause.causeErr, &notfound)
+	})
+
+	t.Run("deliver message failure", func(t *testing.T) {
+		var tc testconf
+		setup(t, &tc, setupOpts{blobSizeLimit: defaultBlobSizeLimit})
+		var (
+			updateID = t.Name() + "-update-id"
+			msgID    = t.Name() + "-message-id"
+			command  = msgCommand(msgID) // blank is invalid
+			msg      = &protocolpb.Message{
+				Id:                 msgID,
+				ProtocolInstanceId: updateID,
+				Body:               mustMarshalAny(t, &updatepb.Acceptance{}),
+			}
+		)
+		tc.ms.EXPECT().GetExecutionInfo().AnyTimes().Return(&persistencespb.WorkflowExecutionInfo{})
+		tc.ms.EXPECT().GetExecutionState().AnyTimes().Return(&persistencespb.WorkflowExecutionState{})
+		tc.ms.EXPECT().GetUpdateOutcome(gomock.Any(), updateID).Return(nil, serviceerror.NewNotFound(""))
+		tc.ms.EXPECT().IsWorkflowExecutionRunning().AnyTimes().Return(true)
+
+		t.Log("create the expected protocol instance")
+		_, _, err := tc.updates.FindOrCreate(context.Background(), updateID)
+		require.NoError(t, err)
+
+		t.Log("delivering an acceptance message to an update in the admitted state should cause a protocol error")
+		_, err = tc.handler.handleCommand(context.Background(), command, newMsgList(msg))
+		require.NoError(t, err)
+		require.NotNil(t, tc.handler.workflowTaskFailedCause)
+		require.Equal(t,
+			enumspb.WORKFLOW_TASK_FAILED_CAUSE_BAD_UPDATE_WORKFLOW_EXECUTION_MESSAGE,
+			tc.handler.workflowTaskFailedCause.failedCause)
+		var gotErr *serviceerror.InvalidArgument
+		require.ErrorAs(t, tc.handler.workflowTaskFailedCause.causeErr, &gotErr)
+	})
+
+	t.Run("deliver message success", func(t *testing.T) {
+		var tc testconf
+		setup(t, &tc, setupOpts{blobSizeLimit: defaultBlobSizeLimit})
+		var (
+			updateID = t.Name() + "-update-id"
+			msgID    = updateID + "/request"
+			command  = msgCommand(msgID) // blank is invalid
+			req      = &updatepb.Request{
+				Meta:  &updatepb.Meta{UpdateId: updateID},
+				Input: &updatepb.Input{Name: "not_empty"},
+			}
+			msg = &protocolpb.Message{
+				Id:                 msgID,
+				ProtocolInstanceId: updateID,
+				Body: mustMarshalAny(t, &updatepb.Acceptance{
+					AcceptedRequestMessageId:         msgID,
+					AcceptedRequestSequencingEventId: 2208,
+					AcceptedRequest:                  req,
+				}),
+			}
+			msgs = newMsgList(msg)
+		)
+		tc.ms.EXPECT().GetExecutionInfo().AnyTimes().Return(&persistencespb.WorkflowExecutionInfo{})
+		tc.ms.EXPECT().GetExecutionState().AnyTimes().Return(&persistencespb.WorkflowExecutionState{})
+		tc.ms.EXPECT().GetUpdateOutcome(gomock.Any(), updateID).Return(nil, serviceerror.NewNotFound(""))
+		tc.ms.EXPECT().IsWorkflowExecutionRunning().AnyTimes().Return(true)
+		tc.ms.EXPECT().AddWorkflowExecutionUpdateAcceptedEvent(updateID, msgID, int64(2208), gomock.Any()).Return(&historypb.HistoryEvent{}, nil)
+
+		t.Log("create the expected protocol instance")
+		upd, _, err := tc.updates.FindOrCreate(context.Background(), updateID)
+		require.NoError(t, err)
+		err = upd.Admit(req, workflow.WithEffects(effect.Immediate(context.Background()), tc.handler.mutableState))
+		require.NoError(t, err)
+		_ = upd.Send(true, &protocolpb.Message_EventId{EventId: 2208})
+
+		_, err = tc.handler.handleCommand(context.Background(), command, msgs)
+		require.NoError(t, err,
+			"delivering a acceptance message to an update in the sent state should succeed")
+		require.Nil(t, tc.handler.workflowTaskFailedCause)
+	})
+
+	t.Run("CHASM command handler is invoked", func(t *testing.T) {
+		var tc testconf
+		setup(t, &tc, setupOpts{blobSizeLimit: defaultBlobSizeLimit, chasmEnabled: true})
+
+		// Register a test handler that returns a sentinel error
+		sentinelErr := errors.New("sentinel: CHASM handler invoked")
+		err := tc.chasmWorkflowRegistry.Register(testWorkflowLibrary{
+			commandHandlers: map[enumspb.CommandType]chasmworkflow.CommandHandler{
+				enumspb.COMMAND_TYPE_SCHEDULE_NEXUS_OPERATION: func(chasm.MutableContext, *chasmworkflow.Workflow, chasmworkflow.Validator, *commandpb.Command, chasmworkflow.CommandHandlerOptions) error {
+					return sentinelErr
+				},
+			},
+		})
+		require.NoError(t, err)
+
+		command := &commandpb.Command{
+			CommandType: enumspb.COMMAND_TYPE_SCHEDULE_NEXUS_OPERATION,
+			Attributes: &commandpb.Command_ScheduleNexusOperationCommandAttributes{
+				ScheduleNexusOperationCommandAttributes: &commandpb.ScheduleNexusOperationCommandAttributes{
+					Endpoint:  "test-endpoint",
+					Service:   "test-service",
+					Operation: "test-operation",
+				},
+			},
+		}
+
+		_, err = tc.handler.handleCommand(context.Background(), command, newMsgList())
+		require.ErrorIs(t, err, sentinelErr)
+	})
+}
+
+func newMsgList(msgs ...*protocolpb.Message) *collection.IndexedTakeList[string, *protocolpb.Message] {
+	return collection.NewIndexedTakeList(msgs, func(msg *protocolpb.Message) string { return msg.Id })
+}
+
+func mustMarshalAny(t *testing.T, pb proto.Message) *anypb.Any {
+	t.Helper()
+	var a anypb.Any
+	require.NoError(t, a.MarshalFrom(pb))
+	return &a
+}
+
+type testWorkflowLibrary struct {
+	commandHandlers map[enumspb.CommandType]chasmworkflow.CommandHandler
+}
+
+func (l testWorkflowLibrary) CommandHandlers() map[enumspb.CommandType]chasmworkflow.CommandHandler {
+	return l.commandHandlers
+}
+
+func (l testWorkflowLibrary) EventDefinitions() []chasmworkflow.EventDefinition {
+	return nil
+}
+
+func TestFlushWorkerCommandsTasks(t *testing.T) {
+	t.Parallel()
+
+	token1 := []byte("token1")
+	token2 := []byte("token2")
+	token3 := []byte("token3")
+	token4 := []byte("token4")
+
+	makeCommands := func(tokens ...[]byte) []*workerpb.WorkerCommand {
+		commands := make([]*workerpb.WorkerCommand, 0, len(tokens))
+		for _, token := range tokens {
+			commands = append(commands, &workerpb.WorkerCommand{
+				Type: &workerpb.WorkerCommand_CancelActivity{
+					CancelActivity: &workerpb.CancelActivityCommand{
+						TaskToken: token,
+					},
+				},
+			})
+		}
+		return commands
+	}
+
+	t.Run("batches commands by control queue", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		ms := historyi.NewMockMutableState(ctrl)
+
+		expectedCommands := makeCommands(token1, token2, token3)
+		ms.EXPECT().AddWorkerCommandsTasks(
+			expectedCommands,
+			"control-queue-1",
+		).Return(nil).Times(1)
+
+		handler := &workflowTaskCompletedHandler{
+			mutableState: ms,
+			pendingWorkerCommandsByControlQueue: map[string][]*workerpb.WorkerCommand{
+				"control-queue-1": expectedCommands,
+			},
+		}
+
+		err := handler.flushWorkerCommandsTasks()
+		require.NoError(t, err)
+	})
+
+	t.Run("creates separate tasks for different control queues", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		ms := historyi.NewMockMutableState(ctrl)
+
+		calls := make(map[string][]*workerpb.WorkerCommand)
+		ms.EXPECT().AddWorkerCommandsTasks(
+			gomock.Any(),
+			gomock.Any(),
+		).DoAndReturn(func(commands []*workerpb.WorkerCommand, queue string) error {
+			calls[queue] = commands
+			return nil
+		}).Times(2)
+
+		handler := &workflowTaskCompletedHandler{
+			mutableState: ms,
+			pendingWorkerCommandsByControlQueue: map[string][]*workerpb.WorkerCommand{
+				"control-queue-1": makeCommands(token1, token2),
+				"control-queue-2": makeCommands(token3, token4),
+			},
+		}
+
+		err := handler.flushWorkerCommandsTasks()
+		require.NoError(t, err)
+
+		require.Len(t, calls["control-queue-1"], 2)
+		require.Len(t, calls["control-queue-2"], 2)
+	})
+
+	t.Run("does nothing when no pending commands", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		ms := historyi.NewMockMutableState(ctrl)
+
+		handler := &workflowTaskCompletedHandler{
+			mutableState:                        ms,
+			pendingWorkerCommandsByControlQueue: nil,
+		}
+
+		err := handler.flushWorkerCommandsTasks()
+		require.NoError(t, err)
+	})
+}
+
+func TestHandlePostCommandEagerExecuteActivity(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	ms := historyi.NewMockMutableState(ctrl)
+	shardCtx := historyi.NewMockShardContext(ctrl)
+
+	activityID := "test-activity-1"
+	scheduledEventID := int64(5)
+
+	ai := &persistencespb.ActivityInfo{
+		ScheduledEventId: scheduledEventID,
+		ActivityId:       activityID,
+		Attempt:          1,
+		Version:          1,
+		StartVersion:     1,
+		TaskQueue:        "test-queue",
+		ActivityType:     &commonpb.ActivityType{Name: "test-activity"},
+	}
+
+	expectedClock := &clockspb.VectorClock{ClusterId: 1, ShardId: 1, Clock: 42}
+
+	ms.EXPECT().IsWorkflowExecutionRunning().Return(true)
+	ms.EXPECT().GetActivityByActivityID(activityID).Return(ai, true)
+	ms.EXPECT().GetAssignedBuildId().Return("")
+	ms.EXPECT().AddActivityTaskStartedEvent(
+		ai, scheduledEventID, gomock.Any(), "test-identity", gomock.Any(), nil, nil, "/_sys/worker-commands/test-ns/key1", expectedClock,
+	).Return(&historypb.HistoryEvent{EventId: 7}, nil)
+	ms.EXPECT().GetExecutionInfo().Return(&persistencespb.WorkflowExecutionInfo{
+		NamespaceId: "test-namespace-id",
+		WorkflowId:  "test-workflow-id",
+	})
+	ms.EXPECT().GetExecutionState().Return(&persistencespb.WorkflowExecutionState{
+		RunId: "test-run-id",
+	})
+	ms.EXPECT().GetWorkflowType().Return(&commonpb.WorkflowType{Name: "test-workflow"})
+	ms.EXPECT().GetNamespaceEntry().Return(tests.LocalNamespaceEntry).AnyTimes()
+
+	shardCtx.EXPECT().NewVectorClock().Return(expectedClock, nil)
+
+	dcClient := dynamicconfig.StaticClient(nil)
+	col := dynamicconfig.NewCollection(dcClient, log.NewNoopLogger())
+	config := configs.NewConfig(col, 1)
+
+	handler := &workflowTaskCompletedHandler{
+		identity:               "test-identity",
+		workerControlTaskQueue: "/_sys/worker-commands/test-ns/key1",
+		mutableState:           ms,
+		shard:                  shardCtx,
+		tokenSerializer:        tasktoken.NewSerializer(),
+		logger:                 log.NewNoopLogger(),
+		metricsHandler:         metrics.NoopMetricsHandler,
+		config:                 config,
+	}
+
+	attr := &commandpb.ScheduleActivityTaskCommandAttributes{
+		ActivityId:   activityID,
+		ActivityType: &commonpb.ActivityType{Name: "test-activity"},
+	}
+
+	mutation, err := handler.handlePostCommandEagerExecuteActivity(context.Background(), attr)
+	require.NoError(t, err)
+	require.NotNil(t, mutation)
+}
+
+func TestHandleCommandRequestCancelActivity_WorkerCommands(t *testing.T) {
+	t.Parallel()
+
+	cancelReqEvent := &historypb.HistoryEvent{EventId: 10}
+	scheduledEventID := int64(5)
+	controlQueue := "/_sys/worker-commands/test-ns/key1"
+
+	t.Run("collects commands for activities with clock, skips those without", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		ms := historyi.NewMockMutableState(ctrl)
+
+		// Activity 1: started with clock (post-deploy) — should produce a cancel command.
+		ai1 := &persistencespb.ActivityInfo{
+			ScheduledEventId:       int64(5),
+			StartedEventId:         7,
+			ActivityId:             "act-1",
+			WorkerControlTaskQueue: controlQueue,
+			StartedClock:           &clockspb.VectorClock{ClusterId: 1, ShardId: 1, Clock: 100},
+			Version:                1,
+			StartVersion:           1,
+			Attempt:                1,
+			ActivityType:           &commonpb.ActivityType{Name: "test-activity"},
+		}
+		// Activity 2: started without clock (pre-deploy) — should be skipped.
+		ai2 := &persistencespb.ActivityInfo{
+			ScheduledEventId:       int64(6),
+			StartedEventId:         8,
+			ActivityId:             "act-2",
+			WorkerControlTaskQueue: controlQueue,
+			StartedClock:           nil,
+			Version:                1,
+			StartVersion:           1,
+			Attempt:                1,
+			ActivityType:           &commonpb.ActivityType{Name: "test-activity"},
+		}
+		// Activity 3: started with clock — should also produce a cancel command.
+		ai3 := &persistencespb.ActivityInfo{
+			ScheduledEventId:       int64(7),
+			StartedEventId:         9,
+			ActivityId:             "act-3",
+			WorkerControlTaskQueue: controlQueue,
+			StartedClock:           &clockspb.VectorClock{ClusterId: 1, ShardId: 1, Clock: 200},
+			Version:                1,
+			StartVersion:           1,
+			Attempt:                1,
+			ActivityType:           &commonpb.ActivityType{Name: "test-activity"},
+		}
+
+		ms.EXPECT().AddActivityTaskCancelRequestedEvent(int64(123), int64(5), "test-identity").
+			Return(&historypb.HistoryEvent{EventId: 10}, ai1, nil)
+		ms.EXPECT().AddActivityTaskCancelRequestedEvent(int64(123), int64(6), "test-identity").
+			Return(&historypb.HistoryEvent{EventId: 11}, ai2, nil)
+		ms.EXPECT().AddActivityTaskCancelRequestedEvent(int64(123), int64(7), "test-identity").
+			Return(&historypb.HistoryEvent{EventId: 12}, ai3, nil)
+		ms.EXPECT().GetNamespaceEntry().Return(tests.LocalNamespaceEntry).AnyTimes()
+		ms.EXPECT().GetWorkflowKey().Return(tests.WorkflowKey).AnyTimes()
+
+		handler := &workflowTaskCompletedHandler{
+			identity:                "test-identity",
+			workflowTaskCompletedID: 123,
+			mutableState:            ms,
+			tokenSerializer:         tasktoken.NewSerializer(),
+			logger:                  log.NewNoopLogger(),
+		}
+
+		for _, id := range []int64{5, 6, 7} {
+			_, err := handler.handleCommandRequestCancelActivity(
+				context.Background(),
+				&commandpb.RequestCancelActivityTaskCommandAttributes{ScheduledEventId: id},
+			)
+			require.NoError(t, err)
+		}
+
+		// Activities 1 and 3 (with clock) should produce commands; activity 2 (nil clock) should be skipped.
+		require.Len(t, handler.pendingWorkerCommandsByControlQueue[controlQueue], 2,
+			"only activities with StartedClock should produce cancel commands")
+	})
+
+	t.Run("started activity without control queue does not collect worker command", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		ms := historyi.NewMockMutableState(ctrl)
+
+		ai := &persistencespb.ActivityInfo{
+			ScheduledEventId:       scheduledEventID,
+			StartedEventId:         7,
+			ActivityId:             "act-1",
+			WorkerControlTaskQueue: "", // worker doesn't support control tasks
+			StartedClock:           &clockspb.VectorClock{ClusterId: 1, ShardId: 1, Clock: 100},
+		}
+
+		ms.EXPECT().AddActivityTaskCancelRequestedEvent(int64(123), scheduledEventID, "test-identity").
+			Return(cancelReqEvent, ai, nil)
+
+		handler := &workflowTaskCompletedHandler{
+			identity:                "test-identity",
+			workflowTaskCompletedID: 123,
+			mutableState:            ms,
+			logger:                  log.NewNoopLogger(),
+		}
+
+		event, err := handler.handleCommandRequestCancelActivity(
+			context.Background(),
+			&commandpb.RequestCancelActivityTaskCommandAttributes{
+				ScheduledEventId: scheduledEventID,
+			},
+		)
+		require.NoError(t, err)
+		require.Equal(t, cancelReqEvent, event)
+		require.Empty(t, handler.pendingWorkerCommandsByControlQueue)
+	})
+}

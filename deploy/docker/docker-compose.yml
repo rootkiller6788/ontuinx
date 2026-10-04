@@ -1,0 +1,80 @@
+# S3.2: OntoOS Distributed Runtime — Docker Compose
+# 单机多进程拓扑，验证分布式不变量。
+
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ontoos
+      POSTGRES_PASSWORD: ontoos
+      POSTGRES_DB: ontoos
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ontoos"]
+      interval: 5s
+
+  temporal-frontend:
+    build: ../../temporal
+    command: ["start", "--config-file", "config/development.yaml", "--allow-no-auth"]
+    depends_on: [postgres]
+    ports: ["7233:7233"]
+    environment:
+      TEMPORAL_SERVER_CONFIG_FILE_PATH: /etc/temporal/config/development.yaml
+
+  temporal-history:
+    build: ../../temporal
+    command: ["start", "--config-file", "config/development.yaml", "--allow-no-auth"]
+    depends_on: [postgres]
+
+  temporal-matching:
+    build: ../../temporal
+    command: ["start", "--config-file", "config/development.yaml", "--allow-no-auth"]
+    depends_on: [postgres]
+    ports: ["7235:7235"]
+
+  temporal-worker:
+    build: ../../temporal
+    command: ["start", "--config-file", "config/development.yaml", "--allow-no-auth"]
+    depends_on: [postgres]
+
+  authority:
+    build: ../..
+    command: ["cargo", "run", "-p", "onto-temporal-adapter", "--bin", "onto-worker"]
+    depends_on: [postgres, temporal-frontend]
+
+  worker-a:
+    build: ../..
+    command: ["cargo", "run", "-p", "onto-temporal-adapter", "--bin", "onto-worker", "--", "task-queue=onto-loop-v0", "worker-id=a"]
+    depends_on: [temporal-matching]
+
+  worker-b:
+    build: ../..
+    command: ["cargo", "run", "-p", "onto-temporal-adapter", "--bin", "onto-worker", "--", "task-queue=onto-loop-v0", "worker-id=b"]
+    depends_on: [temporal-matching]
+
+  worker-c:
+    build: ../..
+    command: ["cargo", "run", "-p", "onto-temporal-adapter", "--bin", "onto-worker", "--", "task-queue=onto-loop-v0", "worker-id=c"]
+    depends_on: [temporal-matching]
+
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:latest
+    ports: ["8474:8474", "27233:27233", "27235:27235"]
+
+  evidence-collector:
+    build: ../..
+    command: ["scripts/runtime-test/collect-evidence.sh", "/evidence"]
+    volumes: [evidence:/evidence]
+
+  test-driver:
+    build: ../..
+    command: ["cargo", "test", "-p", "onto-integration-test", "--", "--nocapture"]
+    depends_on: [worker-a, worker-b, worker-c]
+    volumes: [evidence:/evidence]
+
+volumes:
+  pgdata:
+  evidence:

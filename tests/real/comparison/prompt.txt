@@ -1,0 +1,10 @@
+Write a physics simulation kernel in pure ANSI C. Single file, no external libs, no OpenMP, no intrinsics.
+
+1. Particle system: position, velocity, mass. 1000+ particles.
+2. Forces: gravity (N-body), drag, elastic collision.
+3. Integrator: Velocity Verlet.
+4. Energy tracking: kinetic + potential. Print to stdout as CSV: step,kinetic,potential,total.
+5. Memory: use malloc once at startup, free at exit. No malloc in hot loop.
+6. Output: CSV to stdout, one line per step for 1000 steps.
+
+Output ONLY the C code. No explanation.

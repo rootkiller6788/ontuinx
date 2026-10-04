@@ -1,0 +1,32 @@
+{
+  "milestone": "M6-C Compensatable External Effect Authority",
+  "status": "CLOSED",
+  "date": "2026-07-26",
+  "scope": "single external resource, HTTP-based effect, PG-backed intents and receipts, idempotency-based reconciliation, version-bound single-use compensation",
+  "test_counts": { "total_passed": 118, "failed": 0, "flaky": 0, "consecutive_runs": 5 },
+  "sub_milestones": {
+    "C1": { "status": "CLOSED", "description": "Intent-before-effect" },
+    "C2": { "status": "CLOSED", "description": "External Operation Receipt" },
+    "C3": { "status": "CLOSED", "description": "External State Verification" },
+    "C4": { "status": "CLOSED", "description": "CompensationPermit (resource+version binding, max_uses=1)" },
+    "C5": { "status": "CLOSED", "description": "Compensation Execution" },
+    "C6": { "status": "CLOSED", "description": "Idempotency-based Reconciliation (AlreadyExecuted/NotExecuted/Conflict)" },
+    "C7": { "status": "CLOSED", "description": "Unknown Outcome Recovery" },
+    "C8": { "status": "CLOSED", "description": "External Version Conflict" },
+    "C9": { "status": "CLOSED", "description": "Repeated Reconciliation (zero side effects)" },
+    "C10": { "status": "CLOSED", "description": "Test Isolation (UUID per test, 5x 0 flaky)" }
+  },
+  "invariants_proven": [
+    "No intent → no HTTP call",
+    "No authorization → no HTTP call",
+    "External operation success ≠ task success",
+    "Compensation requires independent, precisely-bound Permit",
+    "Permit max_uses = 1",
+    "External version change → block compensation",
+    "Response lost → query by idempotency key → don't blindly retry",
+    "Same key + different payload → Conflict (not success)",
+    "Repeated reconcile → zero duplicate effects",
+    "Compensated ≠ RolledBack"
+  ],
+  "db_tables": ["ext_resources", "ext_operations", "ext_receipts"]
+}

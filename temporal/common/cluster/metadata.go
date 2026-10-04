@@ -1,0 +1,612 @@
+//go:generate mockgen -package $GOPACKAGE -source $GOFILE -destination metadata_mock.go
+
+package cluster
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"maps"
+	"math"
+	"strconv"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"go.temporal.io/server/common"
+	"go.temporal.io/server/common/collection"
+	"go.temporal.io/server/common/dynamicconfig"
+	"go.temporal.io/server/common/goro"
+	"go.temporal.io/server/common/headers"
+	"go.temporal.io/server/common/log"
+	"go.temporal.io/server/common/log/tag"
+	"go.temporal.io/server/common/metrics"
+	"go.temporal.io/server/common/persistence"
+	"go.temporal.io/server/common/pingable"
+)
+
+const (
+	defaultClusterMetadataPageSize = 100
+	refreshInterval                = time.Minute
+
+	unknownClusterNamePrefix = "unknown-cluster-"
+)
+
+type (
+	// Metadata provides information about the current cluster and other registered remote clusters.
+	Metadata interface {
+		pingable.Pingable
+
+		// IsGlobalNamespaceEnabled whether the global namespace is enabled,
+		// this attr should be discarded when cross DC is made public
+		IsGlobalNamespaceEnabled() bool
+		// IsMasterCluster whether current cluster is master cluster
+		IsMasterCluster() bool
+		// GetClusterID return the cluster ID, which is also the initial failover version
+		GetClusterID() int64
+		// GetNextFailoverVersion return the next failover version for namespace failover
+		GetNextFailoverVersion(string, int64) int64
+		// IsVersionFromSameCluster return true if 2 version are used for the same cluster
+		IsVersionFromSameCluster(version1 int64, version2 int64) bool
+		// GetMasterClusterName return the master cluster name
+		GetMasterClusterName() string
+		// GetCurrentClusterName return the current cluster name
+		GetCurrentClusterName() string
+		// GetAllClusterInfo return the all cluster name -> corresponding info
+		GetAllClusterInfo() map[string]ClusterInformation
+		// ClusterNameForFailoverVersion return the corresponding cluster name for a given failover version
+		ClusterNameForFailoverVersion(isGlobalNamespace bool, failoverVersion int64) string
+		// GetFailoverVersionIncrement return the Failover version increment value
+		GetFailoverVersionIncrement() int64
+		RegisterMetadataChangeCallback(callbackId any, cb CallbackFn)
+		UnRegisterMetadataChangeCallback(callbackId any)
+		Start()
+		Stop()
+	}
+
+	CallbackFn func(oldClusterMetadata map[string]*ClusterInformation, newClusterMetadata map[string]*ClusterInformation)
+
+	// Config contains the all cluster which participated in cross DC
+	Config struct {
+		EnableGlobalNamespace bool `yaml:"enableGlobalNamespace"`
+		// FailoverVersionIncrement is the increment of each cluster version when failover happens.
+		FailoverVersionIncrement int64 `yaml:"failoverVersionIncrement"`
+		// MasterClusterName is the master cluster name, only the master cluster can register / update namespace
+		// all clusters can do namespace failover.
+		MasterClusterName string `yaml:"masterClusterName"`
+		// CurrentClusterName is the name of the current cluster.
+		CurrentClusterName string `yaml:"currentClusterName"`
+		// ClusterInformation is a map from cluster name to corresponding information for each registered cluster.
+		ClusterInformation map[string]ClusterInformation `yaml:"clusterInformation"`
+		// Tags contains customized tags for the current cluster.
+		Tags map[string]string `yaml:"tags"`
+	}
+
+	// ClusterInformation contains information for a single cluster.
+	ClusterInformation struct {
+		Enabled                bool  `yaml:"enabled"`
+		InitialFailoverVersion int64 `yaml:"initialFailoverVersion"`
+		// RPCAddress indicate the remote service address(Host:Port). Host can be DNS name.
+		RPCAddress string `yaml:"rpcAddress"`
+		// HTTPAddress indicates the address of the [go.temporal.io/server/service/frontend.HTTPAPIServer].
+		// E.g. "localhost:7243".
+		HTTPAddress string `yaml:"httpAddress"`
+		// ClusterID allows to explicitly set the ID of the cluster. Optional.
+		ClusterID  string            `yaml:"-"`
+		ShardCount int32             `yaml:"-"` // Ignore this field when loading config.
+		Tags       map[string]string `yaml:"-"` // Ignore this field. Use cluster.Config.Tags for customized tags.
+		// ReplicationEnabled controls whether replication streams are active.
+		ReplicationEnabled bool `yaml:"-"`
+		// private field to track cluster information updates
+		version int64
+	}
+
+	metadataImpl struct {
+		status               int32
+		clusterMetadataStore persistence.ClusterMetadataManager
+		refresher            *goro.Handle
+		refreshDuration      dynamicconfig.DurationPropertyFn
+		logger               log.Logger
+
+		// Immutable fields
+
+		// EnableGlobalNamespace whether the global namespace is enabled,
+		enableGlobalNamespace bool
+		// all clusters can do namespace failover
+		masterClusterName string
+		// currentClusterName is the name of the current cluster
+		currentClusterName string
+		// failoverVersionIncrement is the increment of each cluster's version when failover happen
+		failoverVersionIncrement int64
+
+		// Mutable fields
+
+		clusterLock sync.RWMutex
+		// clusterInfo contains all cluster name -> corresponding information
+		clusterInfo map[string]ClusterInformation
+		// versionToClusterName contains all initial version -> corresponding cluster name
+		versionToClusterName map[int64]string
+
+		clusterCallbackLock   sync.RWMutex
+		clusterChangeCallback map[any]CallbackFn
+	}
+)
+
+func NewMetadata(
+	enableGlobalNamespace bool,
+	failoverVersionIncrement int64,
+	masterClusterName string,
+	currentClusterName string,
+	clusterInfo map[string]ClusterInformation,
+	clusterMetadataStore persistence.ClusterMetadataManager,
+	refreshDuration dynamicconfig.DurationPropertyFn,
+	logger log.Logger,
+) Metadata {
+	if len(clusterInfo) == 0 {
+		panic("Empty cluster information")
+	} else if len(masterClusterName) == 0 {
+		panic("Master cluster name is empty")
+	} else if len(currentClusterName) == 0 {
+		panic("Current cluster name is empty")
+	} else if failoverVersionIncrement == 0 || failoverVersionIncrement > math.MaxInt32 {
+		panic("Version increment <= 0 or > 2147483647")
+	}
+
+	versionToClusterName, err := updateVersionToClusterName(clusterInfo, failoverVersionIncrement)
+	if err != nil {
+		// nolint:forbidigo // matches the other startup-config panics in this constructor
+		panic(err.Error())
+	}
+	if _, ok := clusterInfo[currentClusterName]; !ok {
+		panic("Current cluster is not specified in cluster info")
+	}
+	if _, ok := clusterInfo[masterClusterName]; !ok {
+		panic("Master cluster is not specified in cluster info")
+	}
+
+	copyClusterInfo := make(map[string]ClusterInformation)
+	maps.Copy(copyClusterInfo, clusterInfo)
+	if refreshDuration == nil {
+		refreshDuration = dynamicconfig.GetDurationPropertyFn(refreshInterval)
+	}
+	return &metadataImpl{
+		status:                   common.DaemonStatusInitialized,
+		enableGlobalNamespace:    enableGlobalNamespace,
+		failoverVersionIncrement: failoverVersionIncrement,
+		masterClusterName:        masterClusterName,
+		currentClusterName:       currentClusterName,
+		clusterInfo:              copyClusterInfo,
+		versionToClusterName:     versionToClusterName,
+		clusterChangeCallback:    make(map[any]CallbackFn),
+		clusterMetadataStore:     clusterMetadataStore,
+		logger:                   logger,
+		refreshDuration:          refreshDuration,
+	}
+}
+
+func NewMetadataFromConfig(
+	config *Config,
+	clusterMetadataStore persistence.ClusterMetadataManager,
+	dynamicCollection *dynamicconfig.Collection,
+	logger log.Logger,
+) Metadata {
+	return NewMetadata(
+		config.EnableGlobalNamespace,
+		config.FailoverVersionIncrement,
+		config.MasterClusterName,
+		config.CurrentClusterName,
+		config.ClusterInformation,
+		clusterMetadataStore,
+		dynamicconfig.ClusterMetadataRefreshInterval.Get(dynamicCollection),
+		logger,
+	)
+}
+
+func (m *metadataImpl) Start() {
+	if !atomic.CompareAndSwapInt32(&m.status, common.DaemonStatusInitialized, common.DaemonStatusStarted) {
+		return
+	}
+
+	// TODO: specify a timeout for the context
+	ctx := headers.SetCallerInfo(
+		context.TODO(),
+		headers.SystemBackgroundHighCallerInfo,
+	)
+	err := m.refreshClusterMetadata(ctx)
+	if err != nil {
+		// Crash rather than start with partial cluster metadata (e.g. an invalid
+		// or missing row in cluster_metadata): replication and failover routing
+		// would be incorrect. The Fatal forces operators to fix or remove the bad
+		// row before the next start can succeed.
+		m.logger.Fatal("Unable to initialize cluster metadata cache", tag.Error(err))
+	}
+	m.refresher = goro.NewHandle(ctx).Go(m.refreshLoop)
+}
+
+func (m *metadataImpl) Stop() {
+	if !atomic.CompareAndSwapInt32(&m.status, common.DaemonStatusStarted, common.DaemonStatusStopped) {
+		return
+	}
+
+	m.refresher.Cancel()
+	<-m.refresher.Done()
+}
+
+func (m *metadataImpl) GetPingChecks() []pingable.Check {
+	return []pingable.Check{
+		{
+			Name: "cluster metadata lock",
+			// we don't do any persistence ops under clusterLock, use a short timeout
+			Timeout: 10 * time.Second,
+			Ping: func() []pingable.Pingable {
+				m.clusterLock.Lock()
+				// nolint:staticcheck
+				m.clusterLock.Unlock()
+				return nil
+			},
+			MetricsName: metrics.DDClusterMetadataLockLatency.Name(),
+		},
+		{
+			Name: "cluster metadata callback lock",
+			// listeners get called under clusterCallbackLock, they may do some more work, but
+			// not persistence ops.
+			Timeout: 10 * time.Second,
+			Ping: func() []pingable.Pingable {
+				m.clusterCallbackLock.Lock()
+				// nolint:staticcheck
+				m.clusterCallbackLock.Unlock()
+				return nil
+			},
+			MetricsName: metrics.DDClusterMetadataCallbackLockLatency.Name(),
+		},
+	}
+}
+
+func (m *metadataImpl) IsGlobalNamespaceEnabled() bool {
+	return m.enableGlobalNamespace
+}
+
+func (m *metadataImpl) IsMasterCluster() bool {
+	return m.masterClusterName == m.currentClusterName
+}
+
+func (m *metadataImpl) GetClusterID() int64 {
+	m.clusterLock.RLock()
+	defer m.clusterLock.RUnlock()
+
+	info, ok := m.clusterInfo[m.currentClusterName]
+	if !ok {
+		panic(fmt.Sprintf(
+			"Unknown cluster name: %v with given cluster initial failover version map: %v.",
+			m.currentClusterName,
+			m.clusterInfo,
+		))
+	}
+	return info.InitialFailoverVersion
+}
+
+func (m *metadataImpl) GetNextFailoverVersion(clusterName string, currentFailoverVersion int64) int64 {
+	m.clusterLock.RLock()
+	defer m.clusterLock.RUnlock()
+
+	info, ok := m.clusterInfo[clusterName]
+	if !ok {
+		panic(fmt.Sprintf(
+			"Unknown cluster name: %v with given cluster initial failover version map: %v.",
+			clusterName,
+			m.clusterInfo,
+		))
+	}
+	failoverVersion := currentFailoverVersion/m.failoverVersionIncrement*m.failoverVersionIncrement + info.InitialFailoverVersion
+	if failoverVersion < currentFailoverVersion {
+		return failoverVersion + m.failoverVersionIncrement
+	}
+	return failoverVersion
+}
+
+func (m *metadataImpl) IsVersionFromSameCluster(version1 int64, version2 int64) bool {
+	return (version1-version2)%m.failoverVersionIncrement == 0
+}
+
+func (m *metadataImpl) GetMasterClusterName() string {
+	return m.masterClusterName
+}
+
+func (m *metadataImpl) GetCurrentClusterName() string {
+	return m.currentClusterName
+}
+
+func (m *metadataImpl) GetAllClusterInfo() map[string]ClusterInformation {
+	m.clusterLock.RLock()
+	defer m.clusterLock.RUnlock()
+
+	result := make(map[string]ClusterInformation, len(m.clusterInfo))
+	maps.Copy(result, m.clusterInfo)
+	return result
+}
+
+func (m *metadataImpl) ClusterNameForFailoverVersion(isGlobalNamespace bool, failoverVersion int64) string {
+	if failoverVersion == common.EmptyVersion {
+		// Local namespace uses EmptyVersion. But local namespace could be promoted to global namespace. Once promoted,
+		// workflows with EmptyVersion could be replicated to other clusters. The receiving cluster needs to know that
+		// those workflows are not from their current cluster.
+		if isGlobalNamespace {
+			return unknownClusterNamePrefix + strconv.Itoa(int(failoverVersion))
+		}
+		return m.currentClusterName
+	}
+
+	if !isGlobalNamespace {
+		panic(fmt.Sprintf(
+			"ClusterMetadata encountered local namesapce with failover version %v",
+			failoverVersion,
+		))
+	}
+
+	initialFailoverVersion := failoverVersion % m.failoverVersionIncrement
+	// Failover version starts with 1.  Zero is an invalid value for failover version
+	if initialFailoverVersion == common.EmptyVersion {
+		initialFailoverVersion = m.failoverVersionIncrement
+	}
+
+	m.clusterLock.RLock()
+	defer m.clusterLock.RUnlock()
+	clusterName, ok := m.versionToClusterName[initialFailoverVersion]
+	if !ok {
+		m.logger.Warn(fmt.Sprintf(
+			"Unknown initial failover version %v with given cluster initial failover version map: %v and failover version increment %v.",
+			initialFailoverVersion,
+			m.clusterInfo,
+			m.failoverVersionIncrement,
+		))
+		return unknownClusterNamePrefix + strconv.Itoa(int(initialFailoverVersion))
+	}
+	return clusterName
+}
+
+func (m *metadataImpl) GetFailoverVersionIncrement() int64 {
+	return m.failoverVersionIncrement
+}
+
+func (m *metadataImpl) RegisterMetadataChangeCallback(callbackId any, cb CallbackFn) {
+	m.clusterCallbackLock.Lock()
+	m.clusterChangeCallback[callbackId] = cb
+	m.clusterCallbackLock.Unlock()
+
+	oldEntries := make(map[string]*ClusterInformation)
+	newEntries := make(map[string]*ClusterInformation)
+	m.clusterLock.RLock()
+	for clusterName, clusterInfo := range m.clusterInfo {
+		oldEntries[clusterName] = nil
+		newEntries[clusterName] = ShallowCopyClusterInformation(&clusterInfo)
+	}
+	m.clusterLock.RUnlock()
+	cb(oldEntries, newEntries)
+}
+
+func (m *metadataImpl) UnRegisterMetadataChangeCallback(callbackId any) {
+	m.clusterCallbackLock.Lock()
+	delete(m.clusterChangeCallback, callbackId)
+	m.clusterCallbackLock.Unlock()
+}
+
+func (m *metadataImpl) refreshLoop(ctx context.Context) error {
+	timer := time.NewTicker(m.refreshDuration())
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-timer.C:
+			for err := m.refreshClusterMetadata(ctx); err != nil; err = m.refreshClusterMetadata(ctx) {
+				m.logger.Error("Error refreshing remote cluster metadata", tag.Error(err))
+				refreshTimer := time.NewTimer(m.refreshDuration() / 2)
+
+				select {
+				case <-refreshTimer.C:
+				case <-ctx.Done():
+					refreshTimer.Stop()
+					return nil
+				}
+			}
+		}
+	}
+}
+
+func (m *metadataImpl) refreshClusterMetadata(ctx context.Context) error {
+	clusterMetadataMap, err := m.listAllClusterMetadataFromDB(ctx)
+	if err != nil {
+		return err
+	}
+
+	oldEntries := make(map[string]*ClusterInformation)
+	newEntries := make(map[string]*ClusterInformation)
+
+	clusterInfoMap := m.GetAllClusterInfo()
+	for clusterName, newClusterInfo := range clusterMetadataMap {
+		oldClusterInfo, ok := clusterInfoMap[clusterName]
+		if !ok {
+			// handle new cluster registry
+			oldEntries[clusterName] = nil
+			newEntries[clusterName] = ShallowCopyClusterInformation(newClusterInfo)
+		} else if newClusterInfo.version > oldClusterInfo.version {
+			if newClusterInfo.Enabled == oldClusterInfo.Enabled &&
+				newClusterInfo.ReplicationEnabled == oldClusterInfo.ReplicationEnabled &&
+				newClusterInfo.RPCAddress == oldClusterInfo.RPCAddress &&
+				newClusterInfo.HTTPAddress == oldClusterInfo.HTTPAddress &&
+				newClusterInfo.InitialFailoverVersion == oldClusterInfo.InitialFailoverVersion &&
+				newClusterInfo.ClusterID == oldClusterInfo.ClusterID &&
+				maps.Equal(newClusterInfo.Tags, oldClusterInfo.Tags) {
+				// key cluster info does not change
+				continue
+			}
+			// handle updated cluster registry
+			oldEntries[clusterName] = ShallowCopyClusterInformation(&oldClusterInfo)
+			newEntries[clusterName] = ShallowCopyClusterInformation(newClusterInfo)
+		}
+	}
+	for clusterName, oldClusterInfo := range clusterInfoMap {
+		if _, ok := clusterMetadataMap[clusterName]; !ok {
+			// removed cluster registry
+			oldEntries[clusterName] = &oldClusterInfo
+			newEntries[clusterName] = nil
+		}
+	}
+
+	if len(oldEntries) > 0 {
+		// Build a candidate map, validate it, and only commit on success.
+		// A bad row in cluster_metadata must not be able to crash the refresher
+		// or corrupt the in-memory state.
+		candidate := maps.Clone(clusterInfoMap)
+		applyClusterInfoUpdates(candidate, oldEntries, newEntries)
+		newVersionMap, err := updateVersionToClusterName(candidate, m.failoverVersionIncrement)
+		if err != nil {
+			return fmt.Errorf("rejecting cluster metadata refresh: %w", err)
+		}
+
+		m.clusterLock.Lock()
+		m.clusterInfo = candidate
+		m.versionToClusterName = newVersionMap
+		m.clusterLock.Unlock()
+
+		m.clusterCallbackLock.RLock()
+		defer m.clusterCallbackLock.RUnlock()
+		for _, cb := range m.clusterChangeCallback {
+			cb(oldEntries, newEntries)
+		}
+	}
+	return nil
+}
+
+func applyClusterInfoUpdates(
+	clusterInfo map[string]ClusterInformation,
+	oldClusterMetadata map[string]*ClusterInformation,
+	newClusterMetadata map[string]*ClusterInformation,
+) {
+	for clusterName := range oldClusterMetadata {
+		if oldClusterMetadata[clusterName] != nil && newClusterMetadata[clusterName] == nil {
+			delete(clusterInfo, clusterName)
+		} else {
+			clusterInfo[clusterName] = *newClusterMetadata[clusterName]
+		}
+	}
+}
+
+// ValidateClusterInformation checks the invariants that NewMetadata and the
+// runtime refresh both depend on. It is also used at admin/operator RPC
+// boundaries so that bad input is rejected before it can be persisted and
+// later crash the metadata refresher.
+func ValidateClusterInformation(
+	clusterName string,
+	info ClusterInformation,
+	failoverVersionIncrement int64,
+) error {
+	if clusterName == "" {
+		return errors.New("cluster name must not be empty")
+	}
+	if info.InitialFailoverVersion <= 0 {
+		return fmt.Errorf("cluster %q: InitialFailoverVersion must be > 0, got %d",
+			clusterName, info.InitialFailoverVersion)
+	}
+	if info.InitialFailoverVersion >= failoverVersionIncrement {
+		return fmt.Errorf("cluster %q: InitialFailoverVersion (%d) must be < FailoverVersionIncrement (%d)",
+			clusterName, info.InitialFailoverVersion, failoverVersionIncrement)
+	}
+	if info.Enabled && info.RPCAddress == "" {
+		return fmt.Errorf("cluster %q: RPCAddress must not be empty when Enabled=true", clusterName)
+	}
+	return nil
+}
+
+func updateVersionToClusterName(clusterInfo map[string]ClusterInformation, failoverVersionIncrement int64) (map[int64]string, error) {
+	versionToClusterName := make(map[int64]string)
+	for clusterName, info := range clusterInfo {
+		if err := ValidateClusterInformation(clusterName, info, failoverVersionIncrement); err != nil {
+			return nil, err
+		}
+		if existing, dup := versionToClusterName[info.InitialFailoverVersion]; dup {
+			return nil, fmt.Errorf(
+				"duplicate InitialFailoverVersion %d for clusters %q and %q",
+				info.InitialFailoverVersion, existing, clusterName)
+		}
+		versionToClusterName[info.InitialFailoverVersion] = clusterName
+	}
+	return versionToClusterName, nil
+}
+
+func (m *metadataImpl) listAllClusterMetadataFromDB(
+	ctx context.Context,
+) (map[string]*ClusterInformation, error) {
+	result := make(map[string]*ClusterInformation)
+	metadataStore := m.clusterMetadataStore
+	if metadataStore == nil {
+		return result, nil
+	}
+
+	iterator := GetAllClustersIter(ctx, metadataStore)
+	for iterator.HasNext() {
+		item, err := iterator.Next()
+		if err != nil {
+			return nil, err
+		}
+		result[item.GetClusterName()] = ClusterInformationFromDB(item)
+	}
+	return result, nil
+}
+
+// GetAllClustersIter returns an iterator that can be used to iterate over all clusters in the metadata store.
+func GetAllClustersIter(
+	ctx context.Context,
+	metadataStore persistence.ClusterMetadataManager,
+) collection.Iterator[*persistence.GetClusterMetadataResponse] {
+	paginationFn := func(paginationToken []byte) ([]*persistence.GetClusterMetadataResponse, []byte, error) {
+		resp, err := metadataStore.ListClusterMetadata(
+			ctx,
+			&persistence.ListClusterMetadataRequest{
+				PageSize:      defaultClusterMetadataPageSize,
+				NextPageToken: paginationToken,
+			},
+		)
+		if err != nil {
+			return nil, nil, err
+		}
+		return resp.ClusterMetadata, resp.NextPageToken, nil
+	}
+
+	iterator := collection.NewPagingIterator(paginationFn)
+	return iterator
+}
+
+func ClusterInformationFromDB(getClusterResp *persistence.GetClusterMetadataResponse) *ClusterInformation {
+	return &ClusterInformation{
+		Enabled:                getClusterResp.GetIsConnectionEnabled(),
+		InitialFailoverVersion: getClusterResp.GetInitialFailoverVersion(),
+		RPCAddress:             getClusterResp.GetClusterAddress(),
+		HTTPAddress:            getClusterResp.GetHttpAddress(),
+		ClusterID:              getClusterResp.GetClusterId(),
+		ShardCount:             getClusterResp.GetHistoryShardCount(),
+		Tags:                   getClusterResp.GetTags(),
+		ReplicationEnabled:     getClusterResp.GetIsReplicationEnabled(),
+		version:                getClusterResp.Version,
+	}
+}
+
+// ShallowCopyClusterInformation returns a shallow copy of the given ClusterInformation. The [ClusterInformation.Tags]
+// field is not deep-copied, so you must be careful when modifying it.
+func ShallowCopyClusterInformation(information *ClusterInformation) *ClusterInformation {
+	tmp := *information
+	return &tmp
+}
+
+// IsReplicationEnabledForCluster checks if replication is enabled for a cluster, considering the feature flag.
+// When enableSeparateReplicationFlag is false, it falls back to only checking the Enabled flag.
+// This is a shared helper function used across history service components.
+func IsReplicationEnabledForCluster(clusterInfo ClusterInformation, enableSeparateReplicationFlag bool) bool {
+	if enableSeparateReplicationFlag {
+		// New behavior: check both Enabled (for connectivity) and ReplicationEnabled (for replication streams)
+		return clusterInfo.Enabled && clusterInfo.ReplicationEnabled
+	}
+	// Old behavior: only check Enabled flag
+	return clusterInfo.Enabled
+}

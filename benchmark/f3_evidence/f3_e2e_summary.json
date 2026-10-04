@@ -1,0 +1,21 @@
+{
+  "closed": "2026-08-01",
+  "structured": {
+    "receipt_reason_count": 3,
+    "committed": true,
+    "agent_visible_reason_count": 3,
+    "mode": "Structured"
+  },
+  "generic": {
+    "receipt_reason_count": 3,
+    "committed": true,
+    "agent_visible_reason_count": 0,
+    "mode": "Generic"
+  },
+  "invariants": {
+    "structured": "3→3→3",
+    "generic": "3→3→0",
+    "audit_chain_intact_in_both_modes": true,
+    "projection_separated_from_facts": true
+  }
+}

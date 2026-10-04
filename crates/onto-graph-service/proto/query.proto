@@ -1,0 +1,112 @@
+syntax = "proto3";
+package ocg.query.v1;
+
+// ── P9: Agent 只读查询服务 ──
+// 经 CapabilityGateway Lane B 暴露给 Agent
+
+service QueryService {
+  rpc SearchSymbols(SearchSymbolsRequest) returns (SearchSymbolsResponse);
+  rpc GetSymbolContext(GetSymbolContextRequest) returns (GetSymbolContextResponse);
+  rpc GetCallers(GetCallersRequest) returns (GetCallersResponse);
+  rpc GetCallees(GetCalleesRequest) returns (GetCalleesResponse);
+  rpc GetReferences(GetReferencesRequest) returns (GetReferencesResponse);
+  rpc GetPreviousChanges(GetPreviousChangesRequest) returns (GetPreviousChangesResponse);
+}
+
+// ── 公共类型 ──
+
+message SymbolRef {
+  string entity_key = 1;
+  string qualified_name = 2;
+  string entity_kind = 3;
+  string language = 4;
+  string file_path = 5;
+  int32 start_line = 6;
+}
+
+// ── SearchSymbols ──
+
+message SearchSymbolsRequest {
+  string repository_name = 1;
+  string query = 2;
+  string entity_kind = 3;     // optional filter
+  string language = 4;        // optional filter
+  int32 max_results = 5;      // default 20, max 50
+}
+
+message SearchSymbolsResponse {
+  repeated SymbolRef symbols = 1;
+}
+
+// ── GetSymbolContext ──
+
+message GetSymbolContextRequest {
+  string repository_name = 1;
+  string entity_key = 2;
+}
+
+message GetSymbolContextResponse {
+  SymbolRef symbol = 1;
+  repeated SymbolRef callers = 2;
+  repeated SymbolRef callees = 3;
+  repeated SymbolRef references = 4;
+  int32 resolution_level = 5;   // 0=unknown 1=structural 2=inferred 3=toolchain 4=verified
+}
+
+// ── GetCallers ──
+
+message GetCallersRequest {
+  string repository_name = 1;
+  string entity_key = 2;
+  int32 max_depth = 3;          // default 1, max 3
+  int32 max_results = 4;        // default 10
+}
+
+message GetCallersResponse {
+  repeated SymbolRef symbols = 1;
+}
+
+// ── GetCallees ──
+
+message GetCalleesRequest {
+  string repository_name = 1;
+  string entity_key = 2;
+  int32 max_depth = 3;
+  int32 max_results = 4;
+}
+
+message GetCalleesResponse {
+  repeated SymbolRef symbols = 1;
+}
+
+// ── GetReferences ──
+
+message GetReferencesRequest {
+  string repository_name = 1;
+  string entity_key = 2;
+  string reference_kind = 3;     // optional: "IMPORTS", "USES_TYPE", "READS", "WRITES"
+  int32 max_results = 4;
+}
+
+message GetReferencesResponse {
+  repeated SymbolRef symbols = 1;
+}
+
+// ── GetPreviousChanges ──
+
+message GetPreviousChangesRequest {
+  string repository_name = 1;
+  string entity_key = 2;         // can be file path or entity_key
+  int32 max_results = 3;         // default 5
+}
+
+message ChangeRecord {
+  string attempt_id = 1;
+  string change_type = 2;        // "MODIFIED", "ADDED", "DELETED"
+  string checkpoint_hash = 3;
+  string timestamp = 4;
+}
+
+message GetPreviousChangesResponse {
+  repeated ChangeRecord changes = 1;
+}

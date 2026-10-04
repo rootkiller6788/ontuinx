@@ -1,0 +1,45 @@
+# OntoOS Assurance Test Topology
+#
+# Starts OntoRuntime + ontotest as independent services.
+# ontotest waits for OntoRuntime health, runs tests, then exits.
+# OntoRuntime stays alive until ontotest sends shutdown signal.
+#
+# Usage:
+#   docker compose -f docker-compose.test.yml up --abort-on-container-exit
+#   docker compose -f docker-compose.test.yml down
+
+services:
+  ironclaw:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-sk-test}"
+      OPENAI_BASE_URL: "${OPENAI_BASE_URL:-https://api.deepseek.com/v1}"
+      OPENAI_MODEL: "${OPENAI_MODEL:-deepseek-v4-flash}"
+      IRONCLAW_REBORN_WEBUI_TOKEN: "${WEBUI_TOKEN:-ontotest-token}"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:3000/api/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 10s
+    restart: "no"
+
+  ontotest:
+    build:
+      context: .
+      dockerfile: Dockerfile.runner
+    depends_on:
+      ironclaw:
+        condition: service_healthy
+    environment:
+      IRONCLAW_HOST: "http://ironclaw:3000"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-sk-test}"
+      OPENAI_BASE_URL: "${OPENAI_BASE_URL:-https://api.deepseek.com/v1}"
+      OPENAI_MODEL: "${OPENAI_MODEL:-deepseek-v4-flash}"
+      WEBUI_TOKEN: "${WEBUI_TOKEN:-ontotest-token}"
+    volumes:
+      - ./ontotest/reports:/reports

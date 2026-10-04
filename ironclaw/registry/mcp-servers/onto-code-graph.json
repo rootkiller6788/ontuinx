@@ -1,0 +1,9 @@
+{
+  "name": "onto-code-graph",
+  "display_name": "OntoCodeGraph",
+  "kind": "mcp_server",
+  "description": "Query the OntoCodeGraph repository knowledge graph — search symbols, trace call chains, find references, and review change history",
+  "keywords": ["code", "graph", "symbols", "callers", "callees", "references", "impact", "search"],
+  "url": "http://localhost:50052/mcp",
+  "auth": "none"
+}

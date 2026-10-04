@@ -1,0 +1,7 @@
+{
+    "CurrVersion": "1.10",
+    "MinCompatibleVersion": "0.1",
+    "Description": "add TemporalReportedProblems column",
+    "SchemaUpdateCqlFiles": [],
+    "AllowNoCqlFiles": true
+}

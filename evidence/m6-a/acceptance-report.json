@@ -1,0 +1,41 @@
+{
+  "milestone": "M6-A Staged Filesystem Effect Authority",
+  "status": "CLOSED",
+  "date": "2026-07-25",
+  "scope": "single-machine, local versioned filesystem, Staged Effect, process crash recovery",
+  "sub_milestones": {
+    "M6-A1a": { "status": "CLOSED", "description": "Versioned Staging" },
+    "M6-A1b": { "status": "CLOSED", "description": "Basic Path Safety (absolute, .., symlink rejected)" },
+    "M6-A2a": { "status": "CLOSED", "description": "Durable Decision Authorization" },
+    "M6-A2b": { "status": "CLOSED", "description": "Opaque CommitPermit (fully private fields)" },
+    "M6-A2c": { "status": "CLOSED", "description": "CAS Settlement Protocol + SettlementDecision/EffectClass checks" },
+    "M6-A3": { "status": "CLOSED", "description": "Physical-state Crash Reconciliation (3 windows + CAS competition)" }
+  },
+  "test_results": {
+    "total": 43,
+    "passed": 43,
+    "failed": 0,
+    "time": "<0.2s"
+  },
+  "invariants_proven": [
+    "No Commit → workspace unchanged",
+    "CAS failure → publish_calls == 0",
+    "Receipt failure → not Committed",
+    "Duplicate reconcile → zero new side effects",
+    "Unknown physical state → Frozen + Escalated",
+    "Agent cannot directly modify formal workspace",
+    "OntoRuntime cannot bypass CommitPermit",
+    "Non-durable Decision cannot produce real side effects",
+    "Concurrent executors cannot duplicate publish",
+    "Logical state cannot override physical facts",
+    "Indeterminate state never masquerades as Committed"
+  ],
+  "key_files": {
+    "types": "crates/onto-assurance-types/src/transaction.rs",
+    "ports": "crates/onto-assurance-runtime/src/ports.rs",
+    "coordinator": "crates/onto-assurance-runtime/src/staged_settlement.rs",
+    "adapter": "crates/onto-ironclaw-adapter/src/staged_filesystem.rs",
+    "reconciler": "crates/onto-ironclaw-adapter/src/staged_reconciler.rs",
+    "finalizer": "crates/onto-ironclaw-adapter/src/finalizer.rs"
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "milestone": "M5 Success Authority Takeover",
+  "status": "CLOSED",
+  "date": "2026-07-25",
+  "sub_milestones": {
+    "M5-A": { "status": "CLOSED", "description": "Runtime Wiring — Onto Kernel called on every LoopExit" },
+    "M5-B": { "status": "CLOSED", "description": "Trusted Evidence + Fail-Closed — no pseudo-positive evidence" },
+    "M5-C": { "status": "CLOSED", "description": "Authority Enforcement — OntoRuntime obeys Onto decision" }
+  },
+  "invariants_proven": [
+    "FinishRequested ≠ Success (without evidence → Escalated)",
+    "Empty evidence → EnvironmentError + Escalated, never Success",
+    "UNSAT criterion → Failed + Continuing, never Committed",
+    "Budget Depleted + evidence satisfied → independent dimensions preserved",
+    "Crashed exit → EnvironmentError + Escalated",
+    "ProviderStop + valid evidence → Success (evidence determines, not exit reason)",
+    "Persist failure → Escalated, not Committed",
+    "Idempotent finalization: same inputs → same DecisionId, single persist, single event",
+    "Agent FinishRequested + Onto Escalated = OntoRuntime terminal failure, not Completed"
+  ],
+  "test_results": {
+    "fast_suite": "21 passed, 0 failed",
+    "fast_suite_time": "<1 second",
+    "binary_smoke_no_evidence": "task_outcome=EnvironmentError, lifecycle_state=Escalated",
+    "binary_smoke_authority": "finalizer escalated → blocking loop exit completion → recording terminal failure",
+    "wiring_check": "cargo check --tests passed"
+  },
+  "key_files": {
+    "finalizer": "crates/onto-ironclaw-adapter/src/finalizer.rs",
+    "authority_enforcement": "ironclaw-main/crates/ironclaw_runner/src/turn_run_executor.rs",
+    "composition_bridge": "ironclaw-main/crates/ironclaw_reborn_composition/src/onto_assurance.rs",
+    "ports": "crates/onto-assurance-runtime/src/ports.rs"
+  }
+}

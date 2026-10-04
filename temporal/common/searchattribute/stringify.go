@@ -1,0 +1,210 @@
+package searchattribute
+
+import (
+	"encoding/json"
+	"fmt"
+	"reflect"
+	"strconv"
+	"strings"
+	"time"
+
+	commonpb "go.temporal.io/api/common/v1"
+	enumspb "go.temporal.io/api/enums/v1"
+	"go.temporal.io/server/common/searchattribute/sadefs"
+)
+
+// Stringify converts search attributes to map of strings using (in order):
+// 1. type from MetadataType field,
+// 2. type from typeMap (can be nil).
+// In case of error, it will continue to next search attribute and return last error.
+// Single values are converted using strconv, arrays are converted using json.Marshal.
+// Search attributes with `nil` values are skipped.
+func Stringify(searchAttributes *commonpb.SearchAttributes, typeMap *NameTypeMap) (map[string]string, error) {
+	if len(searchAttributes.GetIndexedFields()) == 0 {
+		return nil, nil
+	}
+
+	result := make(map[string]string, len(searchAttributes.GetIndexedFields()))
+	var lastErr error
+
+	for saName, saPayload := range searchAttributes.GetIndexedFields() {
+		saType := enumspb.INDEXED_VALUE_TYPE_UNSPECIFIED
+		if typeMap != nil {
+			saType, _ = typeMap.getType(saName, customCategory|predefinedCategory)
+		}
+		saValue, err := sadefs.DecodeValue(saPayload, saType, true)
+		if err != nil {
+			// If DecodeValue failed, save error and use raw JSON from Data field.
+			result[saName] = string(saPayload.GetData())
+			lastErr = err
+			continue
+		}
+
+		if saValue == nil {
+			continue
+		}
+
+		switch saTypedValue := saValue.(type) {
+		case string:
+			result[saName] = saTypedValue
+		case int64:
+			result[saName] = strconv.FormatInt(saTypedValue, 10)
+		case float64:
+			result[saName] = strconv.FormatFloat(saTypedValue, 'f', -1, 64)
+		case bool:
+			result[saName] = strconv.FormatBool(saTypedValue)
+		case time.Time:
+			result[saName] = saTypedValue.Format(time.RFC3339Nano)
+		default:
+			switch reflect.TypeOf(saValue).Kind() {
+			case reflect.Slice, reflect.Array:
+				valBytes, err := json.Marshal(saValue)
+				if err != nil {
+					result[saName] = string(saPayload.GetData())
+					lastErr = err
+					continue
+				}
+				result[saName] = string(valBytes)
+			default:
+				result[saName] = fmt.Sprintf("%v", saTypedValue)
+			}
+		}
+	}
+
+	return result, lastErr
+}
+
+// Parse converts maps of search attribute strings to search attributes.
+// typeMap can be nil (values will be parsed with strconv and MetadataType field won't be set).
+// In case of error, it will continue to next search attribute and return last error.
+// Single values are parsed using strconv, arrays are parsed using json.Unmarshal.
+func Parse(searchAttributesStr map[string]string, typeMap *NameTypeMap) (*commonpb.SearchAttributes, error) {
+	if len(searchAttributesStr) == 0 {
+		return nil, nil
+	}
+
+	searchAttributes := &commonpb.SearchAttributes{
+		IndexedFields: make(map[string]*commonpb.Payload, len(searchAttributesStr)),
+	}
+	var lastErr error
+
+	for saName, saValStr := range searchAttributesStr {
+		saType := enumspb.INDEXED_VALUE_TYPE_UNSPECIFIED
+		if typeMap != nil {
+			saType, _ = typeMap.getType(saName, customCategory|predefinedCategory)
+		}
+		saValPayload, err := parseValueOrArray(saValStr, saType)
+		if err != nil {
+			lastErr = err
+		}
+		searchAttributes.IndexedFields[saName] = saValPayload
+	}
+
+	return searchAttributes, lastErr
+}
+
+func parseValueOrArray(valStr string, t enumspb.IndexedValueType) (*commonpb.Payload, error) {
+	var val any
+
+	if isJSONArray(valStr) {
+		var err error
+		val, err = parseJSONArray(valStr, t)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		var err error
+		val, err = parseValueTyped(valStr, t)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return sadefs.EncodeValue(val, t)
+}
+
+func parseValueTyped(valStr string, t enumspb.IndexedValueType) (any, error) {
+	var val any
+	var err error
+
+	switch t {
+	case enumspb.INDEXED_VALUE_TYPE_TEXT,
+		enumspb.INDEXED_VALUE_TYPE_KEYWORD,
+		enumspb.INDEXED_VALUE_TYPE_KEYWORD_LIST:
+		val = valStr
+	case enumspb.INDEXED_VALUE_TYPE_INT:
+		val, err = strconv.ParseInt(valStr, 10, 64)
+	case enumspb.INDEXED_VALUE_TYPE_DOUBLE:
+		val, err = strconv.ParseFloat(valStr, 64)
+	case enumspb.INDEXED_VALUE_TYPE_BOOL:
+		val, err = strconv.ParseBool(valStr)
+	case enumspb.INDEXED_VALUE_TYPE_DATETIME:
+		val, err = time.Parse(time.RFC3339Nano, valStr)
+	case enumspb.INDEXED_VALUE_TYPE_UNSPECIFIED:
+		val = parseValueUnspecified(valStr)
+	default:
+		err = fmt.Errorf("%w: %v", sadefs.ErrInvalidType, t)
+	}
+
+	return val, err
+}
+
+func parseValueUnspecified(valStr string) any {
+	var val any
+	var err error
+
+	if val, err = strconv.ParseInt(valStr, 10, 64); err == nil {
+	} else if val, err = strconv.ParseBool(valStr); err == nil {
+	} else if val, err = strconv.ParseFloat(valStr, 64); err == nil {
+	} else if val, err = time.Parse(time.RFC3339Nano, valStr); err == nil {
+	} else if isJSONArray(valStr) {
+		arr, err := parseJSONArray(valStr, enumspb.INDEXED_VALUE_TYPE_UNSPECIFIED)
+		if err != nil {
+			val = valStr
+		} else {
+			val = arr
+		}
+	} else {
+		val = valStr
+	}
+
+	return val
+}
+
+func isJSONArray(str string) bool {
+	str = strings.TrimSpace(str)
+	return strings.HasPrefix(str, "[") && strings.HasSuffix(str, "]")
+}
+
+func parseJSONArray(str string, t enumspb.IndexedValueType) (any, error) {
+	switch t {
+	case enumspb.INDEXED_VALUE_TYPE_TEXT,
+		enumspb.INDEXED_VALUE_TYPE_KEYWORD,
+		enumspb.INDEXED_VALUE_TYPE_KEYWORD_LIST:
+		var result []string
+		err := json.Unmarshal([]byte(str), &result)
+		return result, err
+	case enumspb.INDEXED_VALUE_TYPE_INT:
+		var result []int64
+		err := json.Unmarshal([]byte(str), &result)
+		return result, err
+	case enumspb.INDEXED_VALUE_TYPE_DOUBLE:
+		var result []float64
+		err := json.Unmarshal([]byte(str), &result)
+		return result, err
+	case enumspb.INDEXED_VALUE_TYPE_BOOL:
+		var result []bool
+		err := json.Unmarshal([]byte(str), &result)
+		return result, err
+	case enumspb.INDEXED_VALUE_TYPE_DATETIME:
+		var result []time.Time
+		err := json.Unmarshal([]byte(str), &result)
+		return result, err
+	case enumspb.INDEXED_VALUE_TYPE_UNSPECIFIED:
+		var result []any
+		err := json.Unmarshal([]byte(str), &result)
+		return result, err
+	default:
+		return nil, fmt.Errorf("%w: %v", sadefs.ErrInvalidType, t)
+	}
+}

@@ -1,0 +1,105 @@
+syntax = "proto3";
+package ocg.graph_risk.v1;
+
+// ── 图谱风险分析服务 ──
+// P7 GraphRiskVerifier 使用这些 RPC 分析变更的代码风险
+
+service GraphRiskService {
+  rpc AnalyzeCallChain(AnalyzeCallChainRequest) returns (AnalyzeCallChainResponse);
+  rpc GetDependencyClosure(GetDependencyClosureRequest) returns (GetDependencyClosureResponse);
+  rpc GetAffectedTests(GetAffectedTestsRequest) returns (GetAffectedTestsResponse);
+  rpc GetSharedStateAccess(GetSharedStateAccessRequest) returns (GetSharedStateAccessResponse);
+  rpc GetLanguageRisks(GetLanguageRisksRequest) returns (GetLanguageRisksResponse);
+}
+
+message EntityRef {
+  string entity_key = 1;
+  string qualified_name = 2;
+  string entity_kind = 3;
+  string file_path = 4;
+  int32 start_line = 5;
+}
+
+// ── 调用链分析 ──
+message AnalyzeCallChainRequest {
+  string snapshot_id = 1;
+  repeated string changed_entity_keys = 2;
+  int32 max_depth = 3;
+  int32 max_results = 4;
+}
+
+message CallChainEntry {
+  EntityRef entity = 1;
+  string edge_kind = 2;
+  string direction = 3;
+  int32 depth = 4;
+}
+
+message AnalyzeCallChainResponse {
+  repeated CallChainEntry entries = 1;
+  int32 total_affected = 2;
+}
+
+// ── 依赖闭包 ──
+message GetDependencyClosureRequest {
+  string snapshot_id = 1;
+  repeated string changed_entity_keys = 2;
+  bool transitive = 3;
+  int32 max_results = 4;
+}
+
+message GetDependencyClosureResponse {
+  repeated EntityRef direct_dependencies = 1;
+  repeated EntityRef dependents = 2;
+  int32 closure_size = 3;
+}
+
+// ── 受影响测试 ──
+message GetAffectedTestsRequest {
+  string snapshot_id = 1;
+  repeated string changed_entity_keys = 2;
+}
+
+message AffectedTest {
+  EntityRef test_entity = 1;
+  string relationship = 2;
+  int32 distance = 3;
+}
+
+message GetAffectedTestsResponse {
+  repeated AffectedTest tests = 1;
+}
+
+// ── 共享状态访问 ──
+message GetSharedStateAccessRequest {
+  string snapshot_id = 1;
+  repeated string changed_entity_keys = 2;
+}
+
+message SharedStateAccess {
+  EntityRef variable = 1;
+  string access_kind = 2;
+  EntityRef accessed_by = 3;
+}
+
+message GetSharedStateAccessResponse {
+  repeated SharedStateAccess accesses = 1;
+}
+
+// ── 语言专项风险 ──
+message GetLanguageRisksRequest {
+  string snapshot_id = 1;
+  repeated string changed_entity_keys = 2;
+  string language = 3;
+}
+
+message LanguageRisk {
+  string risk_type = 1;
+  EntityRef entity = 2;
+  string detail = 3;
+  string severity = 4;
+}
+
+message GetLanguageRisksResponse {
+  repeated LanguageRisk risks = 1;
+}

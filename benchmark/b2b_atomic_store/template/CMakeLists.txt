@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.10)
+project(KVStore C)
+set(CMAKE_C_STANDARD 11)
+add_library(kvstore kvstore.c)
+add_executable(test_kvstore test_kvstore.c)
+target_link_libraries(test_kvstore kvstore)
+enable_testing()
+add_test(NAME kvstore_test COMMAND test_kvstore)

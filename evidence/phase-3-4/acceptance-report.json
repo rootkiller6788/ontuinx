@@ -1,0 +1,43 @@
+{
+  "milestone": "Phase 3+4 Real Verifier Authority",
+  "status": "CLOSED",
+  "date": "2026-07-26",
+  "sub_milestones": {
+    "Phase3_CapabilityInvocationEnvelope": { "status": "CLOSED", "description": "Hook wiring + BeforeCapability observer" },
+    "Phase4_RuntimeObservation": { "status": "CLOSED", "description": "AfterCapability observer + runtime observation" },
+    "Real_Verifier_Authority": { "status": "CLOSED", "description": "FileExists, FileContent, ProtectedPath verifiers → Evidence → M6-A" }
+  },
+  "test_counts": {
+    "onto-assurance-core": 57,
+    "onto-code-pack": 24,
+    "onto-ironclaw-adapter_lib": 86,
+    "e2e_verification_chain": 6,
+    "phase34_acceptance": 5,
+    "hook_registration_test": 7
+  },
+  "total_relevant_tests": 185,
+  "e2e_scenarios": {
+    "E2E-1": { "name": "success_all_verifiers_pass", "result": "Commit", "description": "Agent creates correct file → all 3 verifiers pass → Success+Commit" },
+    "E2E-2": { "name": "content_error_rollback", "result": "Rollback", "description": "Agent creates wrong content → FileExists passes, FileContent fails → Failed+Rollback" },
+    "E2E-3": { "name": "unauthorized_modification", "result": "Denied", "description": "Agent modifies protected path → ProtectedPathVerifier fails → not Committed" },
+    "E2E-4": { "name": "verifier_env_vs_unsat", "result": "UNSAT vs ENV_ERROR separated", "description": "Missing file is UNSAT (task failure), not EnvironmentError" },
+    "E2E-5": { "name": "evidence_before_commit", "result": "Ordering verified", "description": "Evidence → Decision → Commit ordering invariant" },
+    "E2E-6": { "name": "post_verification_tamper", "result": "Stale evidence detected", "description": "Verification passes, then file tampered → stale evidence must not authorize commit" }
+  },
+  "root_invariants_proven": [
+    "Capability execution success ≠ Task success",
+    "Verifier pass without durable Evidence ≠ Commit allowed",
+    "Stale evidence (old manifest hash) ≠ can commit current state",
+    "Only durable Decision + current snapshot binding → CommitPermit"
+  ],
+  "three_onto_hooks": [
+    "onto.assurance.capability.envelope (BeforeCapability)",
+    "onto.assurance.capability.observation (AfterCapability)",
+    "onto.assurance.finalization (AfterLoopExit)"
+  ],
+  "provider_resolver": {
+    "verified_routes": ["deepseek-v4-flash → deepseek (protocol=DeepSeek)", "claude-sonnet-4-20250514 → anthropic (protocol=Anthropic)"],
+    "providers_configured": 26,
+    "model_aliases_configured": "deepseek, anthropic, openai, gemini, ollama, groq, mistral"
+  }
+}

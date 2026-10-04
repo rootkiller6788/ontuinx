@@ -1,0 +1,6 @@
+{
+  "_note": "This fixture is a meta-invariant scenario, not a pipeline fixture. It describes expected behavior for the 'commit_failed' scenario.",
+  "scenario": "commit_failed",
+  "fixture_type": "invariant",
+  "expected_behavior": "Evidence valid and COMMIT decision reached, but publish to OntoRuntime fails"
+}

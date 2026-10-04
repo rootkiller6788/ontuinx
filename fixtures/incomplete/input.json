@@ -1,0 +1,25 @@
+{
+  "scenario": "incomplete",
+  "description": "Blocking criteria satisfied, but non-blocking criterion (lint) unmet",
+  "contract": {
+    "objective": "Add logging to KVDB",
+    "effect_class": "staged",
+    "criteria": [
+      {"id": "c-build", "name": "build", "kind": "test_pass", "is_blocking": true},
+      {"id": "c-tests", "name": "tests", "kind": "test_pass", "is_blocking": true},
+      {"id": "c-lint", "name": "lint", "kind": "lint_pass", "is_blocking": false}
+    ],
+    "approval_mode": "on_failure"
+  },
+  "evidence": [
+    {"criterion_id": "c-build", "kind": "verifier_report", "payload": {"passed": true}},
+    {"criterion_id": "c-tests", "kind": "test_output", "payload": {"passed": true, "total": 9, "passed": true, "passed_count": 9}},
+    {"criterion_id": "c-lint", "kind": "verifier_report", "payload": {"passed": false}}
+  ],
+  "expected": {
+    "task_outcome": "success",
+    "budget_outcome": "within_budget",
+    "lifecycle_state": "committed",
+    "settlement": "commit"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "test_build": "PASS",
+  "test_binary": "build/c/test-runner (588 MB, ASan+UBSan debug build)",
+  "test_execution": "BLOCKED",
+  "blocked_reason": "ASan-instrumented 588MB binary too slow for interactive P0 (estimated hours). Foundation-only target fails to link due to pre-existing mimalloc symbol gap in Makefile.cbm test target.",
+  "recommendation": "Fast-mode test build (without ASan) needed for P1 validation cycle. Record as P0.2-BLOCKED."
+}

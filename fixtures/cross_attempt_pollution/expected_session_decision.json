@@ -1,0 +1,6 @@
+{
+  "_note": "This fixture is a meta-invariant scenario, not a pipeline fixture. It describes expected behavior for the 'cross_attempt_pollution' scenario.",
+  "scenario": "cross_attempt_pollution",
+  "fixture_type": "invariant",
+  "expected_behavior": "Evidence from attempt 1 is reused in attempt 2 — must be rejected"
+}

@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "flow_id": "i3-flow",
+  "work_item_id": "wi-code-task",
+  "loop_id": "loop-i3-flow-wi-code-task",
+  "execution_generation": 1,
+  "request_binding_hash": "a56070625661a730",
+  "reported_terminal_state": "committed",
+  "decision_id": "019fa140-72ce-75f1-a881-1c2940b055b4",
+  "decision_hash": "3c73bb80534cc873",
+  "evidence_bundle_ref": null,
+  "settlement_receipt_ref": null,
+  "output_artifact_refs": [],
+  "output_checkpoint_hash": "ckpt-loop-i3-flow-wi-code-task-019fa140-72ce-75f1-a881-1c2940b055b4",
+  "outcome_binding_hash": "ba8e5d2cf6fecb04",
+  "total_attempts": 2,
+  "terminal_reason": "task committed after 2 attempt(s): Success"
+}

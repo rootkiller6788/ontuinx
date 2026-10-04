@@ -1,0 +1,731 @@
+package history
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	commonpb "go.temporal.io/api/common/v1"
+	enumspb "go.temporal.io/api/enums/v1"
+	"go.temporal.io/api/serviceerror"
+	taskqueuepb "go.temporal.io/api/taskqueue/v1"
+	"go.temporal.io/server/api/historyservice/v1"
+	"go.temporal.io/server/chasm"
+	"go.temporal.io/server/client"
+	"go.temporal.io/server/common"
+	"go.temporal.io/server/common/definition"
+	"go.temporal.io/server/common/log"
+	"go.temporal.io/server/common/metrics"
+	"go.temporal.io/server/common/namespace"
+	"go.temporal.io/server/common/persistence/visibility/manager"
+	"go.temporal.io/server/common/resource"
+	"go.temporal.io/server/service/history/consts"
+	historyi "go.temporal.io/server/service/history/interfaces"
+	"go.temporal.io/server/service/history/ndc"
+	"go.temporal.io/server/service/history/queues"
+	"go.temporal.io/server/service/history/tasks"
+	wcache "go.temporal.io/server/service/history/workflow/cache"
+)
+
+const (
+	recordChildCompletionVerificationFailedMsg = "Failed to verify child execution completion recorded"
+)
+
+type (
+	transferQueueStandbyTaskExecutor struct {
+		*transferQueueTaskExecutorBase
+
+		clusterName string
+		clientBean  client.Bean
+	}
+
+	verificationErr struct {
+		msg string
+		err error
+	}
+)
+
+func newTransferQueueStandbyTaskExecutor(
+	shard historyi.ShardContext,
+	workflowCache wcache.Cache,
+	logger log.Logger,
+	metricProvider metrics.Handler,
+	clusterName string,
+	historyRawClient resource.HistoryRawClient,
+	matchingRawClient resource.MatchingRawClient,
+	visibilityManager manager.VisibilityManager,
+	chasmEngine chasm.Engine,
+	clientBean client.Bean,
+) queues.Executor {
+	return &transferQueueStandbyTaskExecutor{
+		transferQueueTaskExecutorBase: newTransferQueueTaskExecutorBase(
+			shard,
+			workflowCache,
+			logger,
+			metricProvider,
+			historyRawClient,
+			matchingRawClient,
+			visibilityManager,
+			chasmEngine,
+		),
+		clusterName: clusterName,
+		clientBean:  clientBean,
+	}
+}
+
+func (t *transferQueueStandbyTaskExecutor) Execute(
+	ctx context.Context,
+	executable queues.Executable,
+) queues.ExecuteResponse {
+	task := executable.GetTask()
+	taskType := queues.GetStandbyTransferTaskTypeTagValue(task, t.shardContext.ChasmRegistry())
+	metricsTags := []metrics.Tag{
+		getNamespaceTagByID(t.shardContext.GetNamespaceRegistry(), task.GetNamespaceID()),
+		metrics.TaskTypeTag(taskType),
+		metrics.OperationTag(taskType), // for backward compatibility
+	}
+
+	var err error
+	switch task := task.(type) {
+	case *tasks.ActivityTask:
+		err = t.processActivityTask(ctx, task)
+	case *tasks.WorkflowTask:
+		err = t.processWorkflowTask(ctx, task)
+	case *tasks.CancelExecutionTask:
+		err = t.processCancelExecution(ctx, task)
+	case *tasks.SignalExecutionTask:
+		err = t.processSignalExecution(ctx, task)
+	case *tasks.StartChildExecutionTask:
+		err = t.processStartChildExecution(ctx, task)
+	case *tasks.ResetWorkflowTask:
+		// no reset needed for standby
+		// TODO: add error logs
+		err = nil
+	case *tasks.CloseExecutionTask:
+		err = t.processCloseExecution(ctx, task)
+	case *tasks.DeleteExecutionTask:
+		err = t.processDeleteExecutionTask(ctx, task, false)
+	case *tasks.ChasmTask:
+		task.Attempt = executable.Attempt()
+		err = t.executeChasmSideEffectTransferTask(ctx, task)
+	default:
+		err = errUnknownTransferTask
+	}
+
+	return queues.ExecuteResponse{
+		ExecutionMetricTags: metricsTags,
+		ExecutedAsActive:    false,
+		ExecutionErr:        err,
+	}
+}
+
+func (t *transferQueueStandbyTaskExecutor) executeChasmSideEffectTransferTask(
+	ctx context.Context,
+	task *tasks.ChasmTask,
+) error {
+	actionFn := func(
+		ctx context.Context,
+		wfContext historyi.WorkflowContext,
+		ms historyi.MutableState,
+		_ historyi.ReleaseWorkflowContextFunc,
+	) (any, error) {
+		isTaskInTree, isValid, err := validateChasmSideEffectTask(ctx, ms, task)
+		if err != nil {
+			return nil, err
+		}
+		if !isTaskInTree || !isValid {
+			// Replication has removed the logical task, or the component reports it
+			// invalid — drop the physical task.
+			return nil, nil
+		}
+
+		// Task still exists in the tree; retry until the active cluster executes
+		// and replicates the resulting state change.
+		return ms.ChasmTree(), nil
+	}
+
+	chasmTaskType, _ := t.shardContext.ChasmRegistry().TaskFqnByID(task.Info.GetTypeId())
+	return t.processTransfer(
+		ctx,
+		true,
+		task,
+		actionFn,
+		getStandbyPostActionFn(
+			task,
+			t.getCurrentTime,
+			t.config.ChasmStandbyTaskDiscardDelay(chasmTaskType),
+			t.discardChasmTask,
+		),
+	)
+}
+
+func (t *transferQueueStandbyTaskExecutor) discardChasmTask(
+	ctx context.Context,
+	taskInfo tasks.Task,
+	postActionInfo any,
+	logger log.Logger,
+) error {
+	if postActionInfo == nil {
+		return nil
+	}
+	chasmTree, ok := postActionInfo.(historyi.ChasmTree)
+	if !ok {
+		return serviceerror.NewInternal("postActionInfo is not a ChasmTree")
+	}
+	chasmTask, ok := taskInfo.(*tasks.ChasmTask)
+	if !ok {
+		return serviceerror.NewInternal("taskInfo is not a ChasmTask")
+	}
+
+	return discardChasmSideEffectTask(
+		ctx,
+		t.chasmEngine,
+		t.shardContext.ChasmRegistry(),
+		chasmTree,
+		chasmTask,
+		logger,
+		t.clusterName,
+		t.clientBean,
+		t.shardContext.GetNamespaceRegistry(),
+	)
+}
+
+func (t *transferQueueStandbyTaskExecutor) processActivityTask(
+	ctx context.Context,
+	transferTask *tasks.ActivityTask,
+) error {
+	processTaskIfClosed := false
+	actionFn := func(_ context.Context, wfContext historyi.WorkflowContext, mutableState historyi.MutableState, _ historyi.ReleaseWorkflowContextFunc) (any, error) {
+		activityInfo, ok := mutableState.GetActivityInfo(transferTask.ScheduledEventID)
+		if !ok {
+			return nil, nil
+		}
+
+		if activityInfo.Paused {
+			return nil, nil
+		}
+
+		if activityInfo.Stamp != transferTask.Stamp {
+			return nil, consts.ErrStaleReference
+		}
+
+		err := CheckTaskVersion(t.shardContext, t.logger, mutableState.GetNamespaceEntry(), activityInfo.Version, transferTask.Version, transferTask)
+		if err != nil {
+			return nil, err
+		}
+
+		if activityInfo.StartedEventId == common.EmptyEventID {
+			return newActivityTaskPostActionInfo(mutableState, activityInfo)
+		}
+
+		return nil, nil
+	}
+
+	return t.processTransfer(
+		ctx,
+		processTaskIfClosed,
+		transferTask,
+		actionFn,
+		getStandbyPostActionFn(
+			transferTask,
+			t.getCurrentTime,
+			t.config.StandbyTaskMissingEventsDiscardDelay(transferTask.GetType()),
+			t.pushActivity,
+		),
+	)
+}
+
+func (t *transferQueueStandbyTaskExecutor) processWorkflowTask(
+	ctx context.Context,
+	transferTask *tasks.WorkflowTask,
+) error {
+	actionFn := func(_ context.Context, wfContext historyi.WorkflowContext, mutableState historyi.MutableState, _ historyi.ReleaseWorkflowContextFunc) (any, error) {
+		wtInfo := mutableState.GetWorkflowTaskByID(transferTask.ScheduledEventID)
+		if wtInfo == nil {
+			return nil, nil
+		}
+		if transferTask.Stamp != wtInfo.Stamp {
+			return nil, consts.ErrStaleReference
+		}
+
+		_, scheduleToStartTimeout := mutableState.TaskQueueScheduleToStartTimeout(transferTask.TaskQueue)
+		// Task queue is ignored here because at standby, always use original normal task queue,
+		// disregards the transferTask.TaskQueue which could be sticky.
+		// NOTE: scheduleToStart timeout is respected. If workflow was sticky before namespace become standby,
+		// transferTask.TaskQueue is sticky, and there is timer already created for this timeout.
+		// Use this sticky timeout as TTL.
+		taskQueue := &taskqueuepb.TaskQueue{
+			Name: mutableState.GetExecutionInfo().TaskQueue,
+			Kind: enumspb.TASK_QUEUE_KIND_NORMAL,
+		}
+
+		err := CheckTaskVersion(t.shardContext, t.logger, mutableState.GetNamespaceEntry(), wtInfo.Version, transferTask.Version, transferTask)
+		if err != nil {
+			return nil, err
+		}
+
+		if wtInfo.StartedEventID == common.EmptyEventID {
+			return newWorkflowTaskPostActionInfo(
+				mutableState,
+				scheduleToStartTimeout.AsDuration(),
+				taskQueue,
+			)
+		}
+
+		return nil, nil
+	}
+
+	return t.processTransfer(
+		ctx,
+		false,
+		transferTask,
+		actionFn,
+		getStandbyPostActionFn(
+			transferTask,
+			t.getCurrentTime,
+			t.config.StandbyTaskMissingEventsDiscardDelay(transferTask.GetType()),
+			t.pushWorkflowTask,
+		),
+	)
+}
+
+func (t *transferQueueStandbyTaskExecutor) processCloseExecution(
+	ctx context.Context,
+	transferTask *tasks.CloseExecutionTask,
+) error {
+	processTaskIfClosed := true
+	actionFn := func(ctx context.Context, wfContext historyi.WorkflowContext, mutableState historyi.MutableState, release historyi.ReleaseWorkflowContextFunc) (any, error) {
+		if mutableState.IsWorkflowExecutionRunning() {
+			// this can happen if workflow is reset.
+			return nil, nil
+		}
+
+		executionInfo := mutableState.GetExecutionInfo()
+
+		closeVersion, err := mutableState.GetCloseVersion()
+		if err != nil {
+			return nil, err
+		}
+		err = CheckTaskVersion(t.shardContext, t.logger, mutableState.GetNamespaceEntry(), closeVersion, transferTask.Version, transferTask)
+		if err != nil {
+			return nil, err
+		}
+
+		// verify if parent got the completion event
+		verifyCompletionRecorded := mutableState.HasParentExecution() && executionInfo.NewExecutionRunId == ""
+		if verifyCompletionRecorded {
+			// load close event only if needed.
+			completionEvent, err := mutableState.GetCompletionEvent(ctx)
+			if err != nil {
+				return nil, err
+			}
+
+			verifyCompletionRecorded = !ndc.IsTerminatedByResetter(completionEvent)
+		}
+
+		if verifyCompletionRecorded {
+			now := t.getCurrentTime()
+			taskTime := transferTask.GetVisibilityTime()
+			localVerificationTime := taskTime.Add(t.config.MaxLocalParentWorkflowVerificationDuration())
+
+			resendParent := now.After(localVerificationTime) && mutableState.IsTransitionHistoryEnabled() && mutableState.CurrentVersionedTransition() != nil
+
+			// Copy needed values from executionInfo before releasing mutable state
+			parentNamespaceID := executionInfo.ParentNamespaceId
+			parentWorkflowID := executionInfo.ParentWorkflowId
+			parentRunID := executionInfo.ParentRunId
+			parentInitiatedID := executionInfo.ParentInitiatedId
+			parentInitiatedVersion := executionInfo.ParentInitiatedVersion
+			parentClock := executionInfo.ParentClock
+
+			// no need for mutable state anymore, release workflow lock
+			release(nil)
+
+			_, err := t.historyRawClient.VerifyChildExecutionCompletionRecorded(ctx, &historyservice.VerifyChildExecutionCompletionRecordedRequest{
+				NamespaceId: parentNamespaceID,
+				ParentExecution: &commonpb.WorkflowExecution{
+					WorkflowId: parentWorkflowID,
+					RunId:      parentRunID,
+				},
+				ChildExecution: &commonpb.WorkflowExecution{
+					WorkflowId: transferTask.WorkflowID,
+					RunId:      transferTask.RunID,
+				},
+				ParentInitiatedId:      parentInitiatedID,
+				ParentInitiatedVersion: parentInitiatedVersion,
+				Clock:                  parentClock,
+				ResendParent:           resendParent,
+			})
+			switch err.(type) {
+			case nil, *serviceerror.NamespaceNotFound, *serviceerror.Unimplemented:
+				// Case 1: Target workflow is in the desired state.
+				return nil, nil
+			case *serviceerror.NotFound, *serviceerror.WorkflowNotReady:
+				// Case 2: Target workflow is not in the desired state.
+				// Returning a non-nil pointer as postActionInfo here to indicate that verification is not done yet.
+				return &verifyCompletionRecordedPostActionInfo{
+					parentWorkflowKey: &definition.WorkflowKey{
+						NamespaceID: parentNamespaceID,
+						WorkflowID:  parentWorkflowID,
+						RunID:       parentRunID,
+					},
+				}, nil
+			default:
+				// Case 3: Verification itself failed.
+				// NOTE: Wrapping the error as a verification error to prevent mutable state from being cleared and reloaded upon retry,
+				// which is unnecessary as the error is in the target workflow, not this workflow.
+				return nil, &verificationErr{
+					msg: recordChildCompletionVerificationFailedMsg,
+					err: err,
+				}
+			}
+		}
+		return nil, nil
+	}
+
+	return t.processTransfer(
+		ctx,
+		processTaskIfClosed,
+		transferTask,
+		actionFn,
+		getStandbyPostActionFn(
+			transferTask,
+			t.getCurrentTime,
+			t.config.StandbyTaskMissingEventsDiscardDelay(transferTask.GetType()),
+			t.checkParentWorkflowStillExistOnSourceBeforeDiscard,
+		),
+	)
+}
+
+func (t *transferQueueStandbyTaskExecutor) processCancelExecution(
+	ctx context.Context,
+	transferTask *tasks.CancelExecutionTask,
+) error {
+	processTaskIfClosed := false
+	actionFn := func(_ context.Context, wfContext historyi.WorkflowContext, mutableState historyi.MutableState, _ historyi.ReleaseWorkflowContextFunc) (any, error) {
+		requestCancelInfo, ok := mutableState.GetRequestCancelInfo(transferTask.InitiatedEventID)
+		if !ok {
+			return nil, nil
+		}
+
+		err := CheckTaskVersion(t.shardContext, t.logger, mutableState.GetNamespaceEntry(), requestCancelInfo.Version, transferTask.Version, transferTask)
+		if err != nil {
+			return nil, err
+		}
+
+		return &struct{}{}, nil
+	}
+
+	return t.processTransfer(
+		ctx,
+		processTaskIfClosed,
+		transferTask,
+		actionFn,
+		getStandbyPostActionFn(
+			transferTask,
+			t.getCurrentTime,
+			t.config.StandbyTaskMissingEventsDiscardDelay(transferTask.GetType()),
+			t.checkExecutionStillExistsOnSourceBeforeDiscard,
+		),
+	)
+}
+
+func (t *transferQueueStandbyTaskExecutor) processSignalExecution(
+	ctx context.Context,
+	transferTask *tasks.SignalExecutionTask,
+) error {
+	processTaskIfClosed := false
+	actionFn := func(_ context.Context, wfContext historyi.WorkflowContext, mutableState historyi.MutableState, _ historyi.ReleaseWorkflowContextFunc) (any, error) {
+		signalInfo, ok := mutableState.GetSignalInfo(transferTask.InitiatedEventID)
+		if !ok {
+			return nil, nil
+		}
+
+		err := CheckTaskVersion(t.shardContext, t.logger, mutableState.GetNamespaceEntry(), signalInfo.Version, transferTask.Version, transferTask)
+		if err != nil {
+			return nil, err
+		}
+
+		return &struct{}{}, nil
+	}
+
+	return t.processTransfer(
+		ctx,
+		processTaskIfClosed,
+		transferTask,
+		actionFn,
+		getStandbyPostActionFn(
+			transferTask,
+			t.getCurrentTime,
+			t.config.StandbyTaskMissingEventsDiscardDelay(transferTask.GetType()),
+			t.checkExecutionStillExistsOnSourceBeforeDiscard,
+		),
+	)
+}
+
+func (t *transferQueueStandbyTaskExecutor) processStartChildExecution(
+	ctx context.Context,
+	transferTask *tasks.StartChildExecutionTask,
+) error {
+	processTaskIfClosed := true
+	actionFn := func(ctx context.Context, wfContext historyi.WorkflowContext, mutableState historyi.MutableState, release historyi.ReleaseWorkflowContextFunc) (any, error) {
+		childWorkflowInfo, ok := mutableState.GetChildExecutionInfo(transferTask.InitiatedEventID)
+		if !ok {
+			return nil, nil
+		}
+
+		err := CheckTaskVersion(t.shardContext, t.logger, mutableState.GetNamespaceEntry(), childWorkflowInfo.Version, transferTask.Version, transferTask)
+		if err != nil {
+			return nil, err
+		}
+
+		workflowClosed := !mutableState.IsWorkflowExecutionRunning()
+		childStarted := childWorkflowInfo.StartedEventId != common.EmptyEventID
+		childAbandon := childWorkflowInfo.ParentClosePolicy == enumspb.PARENT_CLOSE_POLICY_ABANDON
+
+		// Copy needed values from childWorkflowInfo before releasing mutable state
+		childTargetNamespaceID := childWorkflowInfo.NamespaceId
+		childTargetNamespaceName := namespace.Name(childWorkflowInfo.Namespace)
+		childStartedWorkflowID := childWorkflowInfo.StartedWorkflowId
+		childStartedRunID := childWorkflowInfo.StartedRunId
+		childClock := childWorkflowInfo.Clock
+
+		// no need for mutable state anymore, release workflow lock
+		release(nil)
+
+		if workflowClosed && (!childStarted || !childAbandon) {
+			// NOTE: ideally for workflowClosed, child not started, parent close policy is abandon case,
+			// we should continue to start the child workflow in active cluster, so standby logic also need to
+			// perform the verification. However, we can't do that due to some technial reasons.
+			// Please check the comments in processStartChildExecution in transferQueueActiveTaskExecutor.go
+			// for details.
+			return nil, nil
+		}
+
+		if !childStarted {
+			return &struct{}{}, nil
+		}
+
+		if childTargetNamespaceID == "" {
+			// This is for backward compatibility.
+			// Old mutable state may not have the target namespace ID set in childWorkflowInfo.
+
+			targetNamespaceEntry, err := t.registry.GetNamespace(childTargetNamespaceName)
+			if err != nil {
+				return nil, err
+			}
+			childTargetNamespaceID = targetNamespaceEntry.ID().String()
+		}
+
+		_, err = t.historyRawClient.VerifyFirstWorkflowTaskScheduled(ctx, &historyservice.VerifyFirstWorkflowTaskScheduledRequest{
+			NamespaceId: childTargetNamespaceID,
+			WorkflowExecution: &commonpb.WorkflowExecution{
+				WorkflowId: childStartedWorkflowID,
+				RunId:      childStartedRunID,
+			},
+			Clock: childClock,
+		})
+		switch err.(type) {
+		case nil, *serviceerror.NamespaceNotFound, *serviceerror.Unimplemented:
+			// Case 1: Target workflow is in the desired state.
+			return nil, nil
+		case *serviceerror.NotFound, *serviceerror.WorkflowNotReady:
+			// Case 2: Target workflow is not in the desired state.
+			// Return a non-nil pointer as postActionInfo here to indicate that verification is not done yet.
+			return &struct{}{}, nil
+		default:
+			// Case 3: Verification itself failed.
+			// NOTE: Wrapping the error as a verification error to prevent mutable state from being cleared and reloaded upon retry,
+			// which is unnecessary as the error is in the target workflow, not this workflow.
+			return nil, &verificationErr{
+				msg: recordChildCompletionVerificationFailedMsg,
+				err: err,
+			}
+		}
+	}
+
+	return t.processTransfer(
+		ctx,
+		processTaskIfClosed,
+		transferTask,
+		actionFn,
+		getStandbyPostActionFn(
+			transferTask,
+			t.getCurrentTime,
+			t.config.StandbyTaskMissingEventsDiscardDelay(transferTask.GetType()),
+			t.checkExecutionStillExistsOnSourceBeforeDiscard,
+		),
+	)
+}
+
+func (t *transferQueueStandbyTaskExecutor) processTransfer(
+	ctx context.Context,
+	processTaskIfClosed bool,
+	taskInfo tasks.Task,
+	actionFn standbyActionFn,
+	postActionFn standbyPostActionFn,
+) (retError error) {
+	ctx, cancel := context.WithTimeout(ctx, taskTimeout)
+	defer cancel()
+
+	nsRecord, err := t.shardContext.GetNamespaceRegistry().GetNamespaceByID(namespace.ID(taskInfo.GetNamespaceID()))
+	if err != nil {
+		return err
+	}
+	if !nsRecord.IsOnCluster(t.clusterName) {
+		// namespace is not replicated to local cluster, ignore corresponding tasks
+		return nil
+	}
+
+	weContext, release, err := getWorkflowExecutionContextForTask(ctx, t.shardContext, t.cache, taskInfo)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		var verificationErr *verificationErr
+		switch {
+		case retError == consts.ErrTaskRetry,
+			errors.Is(retError, consts.ErrStaleReference),
+			errors.As(retError, &verificationErr):
+			release(nil)
+		default:
+			release(retError)
+		}
+	}()
+
+	mutableState, err := loadMutableStateForTransferTask(ctx, t.shardContext, weContext, taskInfo, t.metricHandler, t.logger)
+	if err != nil || mutableState == nil {
+		return err
+	}
+
+	if !processTaskIfClosed && !mutableState.IsWorkflowExecutionRunning() {
+		// workflow already finished, no need to process transfer task.
+		return nil
+	}
+
+	postActionInfo, err := actionFn(ctx, weContext, mutableState, release)
+	if err != nil {
+		return err
+	}
+
+	// NOTE: do not access anything related mutable state after this lock release
+	// Release is idempotent, so safe to call even if action already released
+	release(nil)
+	return postActionFn(ctx, taskInfo, postActionInfo, t.logger)
+}
+
+func (t *transferQueueStandbyTaskExecutor) pushActivity(
+	ctx context.Context,
+	task tasks.Task,
+	postActionInfo any,
+	logger log.Logger,
+) error {
+	if postActionInfo == nil {
+		return nil
+	}
+
+	activityTask, ok := task.(*tasks.ActivityTask)
+	if !ok {
+		return serviceerror.NewInternal("task is not an ActivityTask")
+	}
+	pushActivityInfo := postActionInfo.(*activityTaskPostActionInfo)
+	return t.transferQueueTaskExecutorBase.pushActivity(
+		ctx,
+		activityTask,
+		pushActivityInfo.activityTaskScheduleToStartTimeout,
+		pushActivityInfo.versionDirective,
+		pushActivityInfo.priority,
+		historyi.TransactionPolicyPassive,
+	)
+}
+
+func (t *transferQueueStandbyTaskExecutor) pushWorkflowTask(
+	ctx context.Context,
+	task tasks.Task,
+	postActionInfo any,
+	logger log.Logger,
+) error {
+	if postActionInfo == nil {
+		return nil
+	}
+
+	pushwtInfo := postActionInfo.(*workflowTaskPostActionInfo)
+	return t.transferQueueTaskExecutorBase.pushWorkflowTask(
+		ctx,
+		task.(*tasks.WorkflowTask),
+		pushwtInfo.taskqueue,
+		pushwtInfo.workflowTaskScheduleToStartTimeout,
+		pushwtInfo.versionDirective,
+		pushwtInfo.priority,
+		historyi.TransactionPolicyPassive,
+	)
+}
+
+// TODO: deprecate this function and always use t.Now()
+// Only test code sets t.clusterName to be non-current cluster name
+// and advance the time by setting calling shardContext.SetCurrentTime.
+func (t *transferQueueStandbyTaskExecutor) getCurrentTime() time.Time {
+	return t.shardContext.GetCurrentTime(t.clusterName)
+}
+
+func (e *verificationErr) Error() string {
+	return fmt.Sprintf("%v: %v", e.msg, e.err.Error())
+}
+
+func (e *verificationErr) Unwrap() error {
+	return e.err
+}
+
+func (t *transferQueueStandbyTaskExecutor) checkExecutionStillExistsOnSourceBeforeDiscard(
+	ctx context.Context,
+	taskInfo tasks.Task,
+	postActionInfo any,
+	logger log.Logger,
+) error {
+	if postActionInfo == nil {
+		return nil
+	}
+	if !executionExistsOnSource(
+		ctx,
+		taskWorkflowKey(taskInfo),
+		getTaskArchetypeID(taskInfo),
+		logger,
+		t.clusterName,
+		t.clientBean,
+		t.shardContext.GetNamespaceRegistry(),
+		t.shardContext.ChasmRegistry(),
+	) {
+		return standbyTransferTaskPostActionTaskDiscarded(ctx, taskInfo, nil, logger)
+	}
+	return standbyTransferTaskPostActionTaskDiscarded(ctx, taskInfo, postActionInfo, logger)
+}
+
+func (t *transferQueueStandbyTaskExecutor) checkParentWorkflowStillExistOnSourceBeforeDiscard(
+	ctx context.Context,
+	taskInfo tasks.Task,
+	postActionInfo any,
+	logger log.Logger,
+) error {
+	if postActionInfo == nil {
+		return nil
+	}
+	verifyCompletionInfo, ok := postActionInfo.(*verifyCompletionRecordedPostActionInfo)
+	if !ok || verifyCompletionInfo.parentWorkflowKey == nil {
+		return standbyTransferTaskPostActionTaskDiscarded(ctx, taskInfo, postActionInfo, logger)
+	}
+
+	if !executionExistsOnSource(
+		ctx,
+		*verifyCompletionInfo.parentWorkflowKey,
+		getTaskArchetypeID(taskInfo),
+		logger,
+		t.clusterName,
+		t.clientBean,
+		t.shardContext.GetNamespaceRegistry(),
+		t.shardContext.ChasmRegistry(),
+	) {
+		return standbyTransferTaskPostActionTaskDiscarded(ctx, taskInfo, nil, logger)
+	}
+	return standbyTransferTaskPostActionTaskDiscarded(ctx, taskInfo, postActionInfo, logger)
+}

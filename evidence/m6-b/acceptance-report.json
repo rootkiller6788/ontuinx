@@ -1,0 +1,40 @@
+{
+  "milestone": "M6-B PostgreSQL Transactional Effect Authority",
+  "status": "CLOSED",
+  "date": "2026-07-26",
+  "scope": "single PostgreSQL instance, single DB transaction, business data + commit marker + outbox atomic commit",
+  "test_counts": {
+    "total": 102,
+    "adapter_lib": 86,
+    "real_pg_integration": 16
+  },
+  "sub_milestones": {
+    "B0": { "status": "CLOSED", "description": "Real PostgreSQL DecisionStore" },
+    "B1": { "status": "CLOSED", "description": "Transaction + Candidate State (BEGIN→execute→inspect)" },
+    "B2": { "status": "CLOSED", "description": "Verifier-driven COMMIT/ROLLBACK + Decision-gated rejection" },
+    "B3": { "status": "CLOSED", "description": "Commit Marker + Idempotency + Permit binding" },
+    "B4": { "status": "CLOSED", "description": "Crash Reconciliation (marker confirms commit, no marker = safe retry)" },
+    "B5": { "status": "CLOSED", "description": "Transactional Outbox (same-PG-transaction atomic)" },
+    "B6": { "status": "PROTOCOL_VERIFIED", "description": "Redis Projection pattern verified; real Redis E2E pending" },
+    "B7": { "status": "CLOSED", "description": "Idempotency payload conflict preserved" },
+    "B8": { "status": "CLOSED", "description": "Post-commit receipt recovery via marker" }
+  },
+  "invariants_proven": [
+    "No Decision → no COMMIT",
+    "Non-Success → no COMMIT",
+    "Non-Commit settlement → block",
+    "Non-Transactional effect → block",
+    "Verifier fails → PG ROLLBACK, data unchanged",
+    "Business + Marker + Outbox same-PG-transaction atomic",
+    "COMMIT response lost → check Marker → no SQL replay",
+    "Same idempotency key + different payload → conflict, first write preserved",
+    "External receipt lost → marker recovery → catch-up projection only"
+  ],
+  "db_tables": [
+    "onto_decisions",
+    "onto_transactions",
+    "onto_receipts",
+    "onto_effect_commits",
+    "onto_outbox"
+  ]
+}

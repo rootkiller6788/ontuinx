@@ -1,0 +1,215 @@
+
+running 57 tests
+test attempt_decision::tests::environment_error_freezes ... ok
+test attempt_decision::tests::incomplete_budget_depleted_escalates ... ok
+test attempt_decision::tests::incomplete_within_budget_retries ... ok
+test attempt_decision::tests::success_with_staged_commits ... ok
+test attempt_decision::tests::success_with_irreversible_confirms ... ok
+test canonical::tests::deterministic_hash_same_input ... ok
+test canonical::tests::different_domains_different_hash ... ok
+test canonical::tests::infinity_number_rejected_by_serde_json ... ok
+test canonical::tests::different_inputs_different_hash ... ok
+test canonical::tests::nan_number_rejected_by_serde_json ... ok
+test canonical::tests::sorted_keys_vs_insertion_order ... ok
+test canonical::tests::string_containing_nan_is_accepted ... ok
+test canonical::tests::valid_float_accepted ... ok
+test checkpoint::tests::checkpoint_binding_roundtrip ... ok
+test effect_classifier::tests::critical_risk_escalates_to_irreversible ... ok
+test checkpoint::tests::context_hash_deterministic ... ok
+test effect_classifier::tests::declared_class_cannot_downgrade ... ok
+test effect_classifier::tests::deploy_is_irreversible ... ok
+test effect_classifier::tests::drop_table_without_transaction_is_irreversible ... ok
+test effect_classifier::tests::file_write_is_staged ... ok
+test effect_classifier::tests::file_write_underscore_is_staged ... ok
+test effect_classifier::tests::more_restrictive_ordering ... ok
+test effect_classifier::tests::read_is_readonly ... ok
+test effect_classifier::tests::send_email_is_irreversible ... ok
+test effect_classifier::tests::rewrite_not_matched_as_write ... ok
+test effect_classifier::tests::sql_with_begin_is_transactional ... ok
+test effect_classifier::tests::thread_not_matched_as_read ... ok
+test effect_classifier::tests::unknown_capability_is_irreversible ... ok
+test evidence_chain::tests::chain_sealed_no_append ... ok
+test evidence_chain::tests::tampered_evidence_detected ... ok
+test evidence_chain::tests::chain_append_and_verify ... ok
+test invalidation::tests::code_change_invalidates ... ok
+test invalidation::tests::no_change_valid ... ok
+test reduction::tests::blocking_unsatisfied_fails ... ok
+test reduction::tests::duplicate_evidence_no_increase ... ok
+test reduction::tests::property_no_criteria_no_problem ... ok
+test replay::tests::different_inputs_different_replay_hash ... ok
+test reduction::tests::no_evidence_no_success ... ok
+test replay::tests::replay_hash_deterministic ... ok
+test invalidation::tests::verifier_change_invalidates ... ok
+test session_decision::tests::budget_depleted_but_success_is_still_success ... ok
+test session_decision::tests::crash_is_environment_error_not_failed ... ok
+test invalidation::tests::requirement_change_invalidates ... ok
+test reduction::tests::property_cross_criterion_evidence_independence ... ok
+test settlement::tests::environment_error_freezes ... ok
+test settlement::tests::irreversible_success_confirms ... ok
+test reduction::tests::all_satisfied_passes ... ok
+test settlement::tests::pure_success_no_settlement ... ok
+test settlement::tests::irreversible_failed_escalates ... ok
+test settlement::tests::staged_incomplete_with_blocking_rolls_back ... ok
+test settlement::tests::staged_success_commits ... ok
+test session_decision::tests::finish_with_all_criteria_met_is_success ... ok
+test session_decision::tests::stuck_with_failure_is_escalated ... ok
+test invalidation::tests::cross_attempt_evidence_rejected ... ok
+test settlement::tests::compensatable_incomplete_compensates ... ok
+test reduction::tests::property_evidence_for_unknown_criterion_ignored ... ok
+test reduction::tests::non_blocking_unsatisfied_still_passes ... ok
+
+test result: ok. 57 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 24 tests
+test artifact_collector::tests::collect_and_classify ... ok
+test artifact_collector::tests::hash_deterministic ... ok
+test artifact_collector::tests::hash_different_content ... ok
+test build_verifier::tests::build_failure_reports_fail ... ok
+test build_verifier::tests::build_success_reports_pass ... ok
+test lint_verifier::tests::lint_fail ... ok
+test lint_verifier::tests::lint_pass ... ok
+test project_profiler::tests::detect_c_project ... ok
+test project_profiler::tests::detect_cpp_project ... ok
+test project_profiler::tests::detect_rust_project ... ok
+test project_profiler::tests::detect_javascript_project ... ok
+test project_profiler::tests::python_project_detected ... ok
+test project_profiler::tests::unknown_project ... ok
+test test_verifier::tests::cargo_all_pass ... ok
+test test_verifier::tests::cargo_some_fail ... ok
+test test_verifier::tests::pytest_format ... ok
+test file_verifiers::tests::content_mismatch_detected ... ok
+test file_verifiers::tests::forbidden_content_detected ... ok
+test file_verifiers::tests::content_contains_detects_substring ... ok
+test file_verifiers::tests::content_exact_match ... ok
+test file_verifiers::tests::file_exists_when_missing ... ok
+test file_verifiers::tests::file_exists_when_present ... ok
+test file_verifiers::tests::protected_path_modified_detected ... ok
+test file_verifiers::tests::protected_path_unchanged ... ok
+
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+
+running 86 tests
+test builtin_bridge::tests::builtin_gate_file_write_allowed ... ok
+test builtin_bridge::tests::builtin_gate_irreversible_requires_approval ... ok
+test builtin_bridge::tests::confirm_on_failure_is_passed_through ... ok
+test builtin_bridge::tests::monotonic_tightening_commit_on_failure_escalates ... ok
+test builtin_bridge::tests::monotonic_tightening_commit_on_success_passes ... ok
+test builtin_bridge::tests::rollback_is_always_passed_through ... ok
+test builtin_bridge::tests::shadow_observer_classifies_correctly ... ok
+test builtin_bridge::tests::shadow_unknown_tool_is_irreversible ... ok
+test builtin_bridge::tests::fault_injection_persist_failure_still_returns_decision ... ok
+test builtin_bridge::tests::full_finalization_pipeline_with_mock_stores ... ok
+test builtin_bridge::tests::stub_finalization_preserves_budget ... ok
+test builtin_bridge::tests::stub_finalization_returns_success ... ok
+test capability_descriptor::tests::create_envelope_uses_descriptor_not_agent_input ... ok
+test capability_descriptor::tests::deploy_is_irreversible_and_requires_approval ... ok
+test capability_descriptor::tests::downgrade_blocked_on_envelope ... ok
+test capability_descriptor::tests::unknown_capability_returns_not_found ... ok
+test capability_descriptor::tests::resolves_known_capability ... ok
+test compensation_adapter::tests::compensation_failure_is_reported ... ok
+test compensation_adapter::tests::execute_and_compensate ... ok
+test compensation_adapter::tests::duplicate_idempotency_key_rejected ... ok
+test compensation_adapter::tests::execute_and_confirm ... ok
+test compensation_adapter::tests::unknown_outcome_is_not_retried ... ok
+test database_adapter::tests::begin_execute_commit_flow ... ok
+test database_adapter::tests::coordinator_rejects_without_success_decision ... ok
+test database_adapter::tests::rollback_cleans_up ... ok
+test envelope_capability_port::tests::envelope_uses_trusted_effect_class ... ok
+test envelope_capability_port::tests::file_write_is_staged_not_agent_controlled ... ok
+test database_adapter::tests::coordinator_authorizes_with_valid_decision ... ok
+test finalizer::tests::budget_depleted_success_independent_dimensions ... ok
+test finalizer::tests::crashed_exit_environment_error_escalated ... ok
+test envelope_capability_port::tests::unknown_capability_fails_closed ... ok
+test finalizer::tests::empty_evidence_rejects_success ... ok
+test finalizer::tests::provider_stop_with_valid_evidence_success ... ok
+test irreversible_adapter::tests::expired_lease_rejected ... ok
+test finalizer::tests::duplicate_finalize_idempotent ... ok
+test finalizer::tests::idempotency_single_persist_single_event ... ok
+test finalizer::tests::real_evidence_success_committed ... ok
+test model_capabilities::tests::deepseek_v4_flash_supports_tool_calling ... ok
+test irreversible_adapter::tests::unknown_outcome_is_not_retried ... ok
+test database_adapter::tests::commit_with_wrong_permit_rejected ... ok
+test model_capabilities::tests::validates_task_requirements ... ok
+test finalizer::tests::persist_failure_must_not_commit ... ok
+test model_capabilities::tests::unknown_model_defaults_to_no_capabilities ... ok
+test irreversible_adapter::tests::unauthorized_dispatch_rejected ... ok
+test irreversible_adapter::tests::lease_consumed_twice_rejected ... ok
+test finalizer::tests::unsatisfied_criterion_failed_continuing ... ok
+test irreversible_adapter::tests::authorized_dispatch_succeeds ... ok
+test ontoloop_agent_stub::tests::environment_error_escalates_immediately ... ok
+test ontoloop_agent_stub::tests::iteration_count_stop_condition ... ok
+test ontoloop_agent_stub::tests::iteration_count_one_allows_single_run ... ok
+test ontoloop_agent_stub::tests::verify_completion_on_success_committed ... ok
+test run_ingress::tests::all_actor_types_accepted ... ok
+test ontoloop_agent_stub::tests::failed_injects_structured_feedback_not_fuzzy_prompt ... ok
+test run_ingress::tests::stub_accepts_valid_request ... ok
+test runtime_observation::tests::observation_separates_facts_from_judgment ... ok
+test run_ingress::tests::stub_blocks_disallowed_sources ... ok
+test run_ingress::tests::conversation_still_works ... ok
+test runtime_observation::tests::records_observation ... ok
+test run_ingress::tests::stub_rejects_empty_objective ... ok
+test run_ingress_cli::tests::json_generation_includes_all_fields ... ok
+test ontoloop_agent_stub::tests::second_attempt_prompt_includes_repair_guidance ... ok
+test run_ingress_cli::tests::rejects_empty_objective ... ok
+test staged_reconciler::tests::already_finalized_returns_immediately ... ok
+test staged_reconciler::tests::cas_conflict_only_one_publisher_wins ... ok
+test staged_reconciler::tests::cas_failure_never_calls_filesystem ... ok
+test staged_reconciler::tests::decided_state_safe_to_retry ... ok
+test staged_reconciler::tests::publishing_before_switch_retries_once ... ok
+test staged_reconciler::tests::publishing_with_receipt_only_projects_state ... ok
+test staged_reconciler::tests::publishing_with_receipt_projects_state ... ok
+test staged_reconciler::tests::receipt_persist_failure_never_commits ... ok
+test staged_reconciler::tests::single_publish_exactly_one_of_everything ... ok
+test staged_filesystem::tests::reject_dot_dot_traversal ... ok
+test staged_filesystem::tests::m6a2_non_success_task_rejected ... ok
+test staged_filesystem::tests::m6a2_unknown_decision_rejected ... ok
+test staged_filesystem::tests::allow_valid_path_inside_workspace ... ok
+test staged_filesystem::tests::no_commit_workspace_unchanged ... ok
+test staged_filesystem::tests::reject_symlink ... ok
+test staged_filesystem::tests::reject_absolute_path_outside_workspace ... ok
+test staged_filesystem::tests::real_manifest_hash_successful_publish ... ok
+test staged_filesystem::tests::idempotent_publish_same_receipt ... ok
+test staged_filesystem::tests::wrong_transaction_id_rejected_by_permit ... ok
+test staged_filesystem::tests::wrong_baseline_hash_rejected_by_permit ... ok
+test staged_filesystem::tests::valid_commit_atomic_switch ... ok
+test staged_filesystem::tests::m6a2_valid_decision_authorizes_and_publishes ... ok
+test postgres_adapter::tests::real_pg_wrong_permit_rejected ... ok
+test postgres_adapter::tests::real_pg_begin_commit ... ok
+
+test result: ok. 86 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.53s
+
+
+running 6 tests
+test e2e1_success_all_verifiers_pass_commit ... ok
+test e2e5_evidence_before_commit ... ok
+test e2e2_content_error_rollback ... ok
+test e2e3_unauthorized_modification_denied ... ok
+test e2e4_verifier_env_error_escalates ... ok
+test e2e6_post_verification_tamper_freezes ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+
+running 7 tests
+test tests::after_loop_exit_m5_verified_runtime ... ok
+test tests::all_three_hooks_present_in_binary ... ok
+test tests::hooks_are_builtin_tier ... ok
+test tests::hooks_use_authorization_phase ... ok
+test tests::m5_hook_registered_at_after_loop_exit ... ok
+test tests::phase_3_hook_registered_at_before_capability ... ok
+test tests::phase_4_hook_registered_at_after_capability ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 5 tests
+test golden_code_error_escalate ... ok
+test golden_normal_commit ... ok
+test golden_unauthorized_denied ... ok
+test evidence_chain_verifies_correctly ... ok
+test tampered_evidence_detected ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

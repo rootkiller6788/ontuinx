@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ontoos.dev/schemas/v1/loop_terminal_envelope.schema.json",
+  "title": "LoopTerminalEnvelope",
+  "description": "Rust Worker → Go OntoFlow terminal report. Worker report, NOT authoritative fact. Go MUST verify via AuthorityProjectionPort.",
+  "type": "object",
+  "required": [
+    "schema_version", "flow_id", "work_item_id", "loop_id",
+    "execution_generation", "request_binding_hash",
+    "reported_terminal_state", "outcome_binding_hash",
+    "total_attempts", "terminal_reason"
+  ],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "flow_id": { "type": "string", "minLength": 1 },
+    "work_item_id": { "type": "string", "minLength": 1 },
+    "loop_id": { "type": "string", "minLength": 1 },
+    "execution_generation": { "type": "integer", "minimum": 1 },
+    "request_binding_hash": { "type": "string", "minLength": 1 },
+    "reported_terminal_state": {
+      "type": "string",
+      "enum": ["committed", "escalated", "environment_blocked", "loop_budget_exhausted", "cancelled", "protocol_failed"]
+    },
+    "decision_id": { "type": "string" },
+    "decision_hash": { "type": "string" },
+    "evidence_bundle_ref": { "type": "string" },
+    "settlement_receipt_ref": { "type": "string" },
+    "output_artifact_refs": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "output_checkpoint_hash": { "type": "string" },
+    "outcome_binding_hash": { "type": "string", "minLength": 1 },
+    "total_attempts": { "type": "integer", "minimum": 0 },
+    "terminal_reason": { "type": "string" }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package temporal.server.api.enums.v1;
+
+option go_package = "go.temporal.io/server/api/enums/v1;enums";
+
+enum DLQOperationType {
+  DLQ_OPERATION_TYPE_UNSPECIFIED = 0;
+  DLQ_OPERATION_TYPE_MERGE = 1;
+  DLQ_OPERATION_TYPE_PURGE = 2;
+}
+
+enum DLQOperationState {
+  DLQ_OPERATION_STATE_UNSPECIFIED = 0;
+  DLQ_OPERATION_STATE_RUNNING = 1;
+  DLQ_OPERATION_STATE_COMPLETED = 2;
+  DLQ_OPERATION_STATE_FAILED = 3;
+}

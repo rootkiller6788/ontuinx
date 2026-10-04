@@ -1,0 +1,14 @@
+[package]
+name = "onto-graph-core"
+version = "0.1.0"
+edition = "2021"
+description = "OntoFirmwareGraph C compute kernel (P2) — FFI bindings to CBM-derived ofg-core"
+
+[lib]
+name = "onto_graph_core"
+
+[build-dependencies]
+cc = "1"
+
+[dependencies]
+libc = "0.2"

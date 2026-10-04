@@ -1,0 +1,1265 @@
+package matching
+
+import (
+	"cmp"
+	"context"
+	"errors"
+	"math/rand"
+	"runtime"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/suite"
+	commonpb "go.temporal.io/api/common/v1"
+	enumspb "go.temporal.io/api/enums/v1"
+	"go.temporal.io/server/api/matchingservice/v1"
+	persistencespb "go.temporal.io/server/api/persistence/v1"
+	taskqueuespb "go.temporal.io/server/api/taskqueue/v1"
+	"go.temporal.io/server/common/clock"
+	"go.temporal.io/server/common/dynamicconfig"
+	"go.temporal.io/server/common/log"
+	"go.temporal.io/server/common/payloads"
+	"go.temporal.io/server/common/softassert"
+	"go.temporal.io/server/common/testing/testlogger"
+	"go.temporal.io/server/common/tqid"
+	"google.golang.org/protobuf/types/known/timestamppb"
+)
+
+type MatcherDataSuite struct {
+	suite.Suite
+	ts               *clock.EventTimeSource
+	md               matcherData
+	rateLimitedCount atomic.Int32
+}
+
+func TestMatcherDataSuite(t *testing.T) {
+	t.Parallel()
+	suite.Run(t, new(MatcherDataSuite))
+}
+
+func (s *MatcherDataSuite) SetupTest() {
+	cfg := newTaskQueueConfig(
+		tqid.UnsafeTaskQueueFamily("nsid", "tq").TaskQueue(enumspb.TASK_QUEUE_TYPE_ACTIVITY),
+		NewConfig(dynamicconfig.NewNoopCollection()),
+		"nsname",
+	)
+	logger := testlogger.NewTestLogger(s.T(), testlogger.FailOnAnyUnexpectedError)
+	s.ts = clock.NewEventTimeSource().Update(time.Now())
+	s.ts.UseAsyncTimers(true)
+	rateLimitManager := newRateLimitManager(&mockUserDataManager{}, cfg, enumspb.TASK_QUEUE_TYPE_ACTIVITY)
+	rateLimitManager.Start()
+	s.rateLimitedCount.Store(0)
+	s.md = newMatcherData(cfg, logger, s.ts, true, rateLimitManager, func() { s.rateLimitedCount.Add(1) })
+}
+
+func (s *MatcherDataSuite) now() time.Time {
+	return s.ts.Now()
+}
+
+func (s *MatcherDataSuite) pollRealTime(timeout time.Duration) *matchResult {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return s.pollContext(ctx, nil)
+}
+
+func (s *MatcherDataSuite) pollFakeTime(timeout time.Duration) *matchResult {
+	ctx, cancel := clock.ContextWithTimeout(context.Background(), timeout, s.ts)
+	defer cancel()
+	return s.pollContext(ctx, nil)
+}
+
+func (s *MatcherDataSuite) pollWithMinPriority(timeout time.Duration, minPriority int32) *matchResult {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return s.pollContext(ctx, &pollMetadata{
+		conditions: &matchingservice.PollConditions{
+			MinPriority: minPriority,
+		},
+	})
+}
+
+func (s *MatcherDataSuite) pollContext(ctx context.Context, meta *pollMetadata) *matchResult {
+	return s.md.EnqueuePollerAndWait([]context.Context{ctx}, &waitingPoller{
+		startTime:    s.now(),
+		forwardCtx:   ctx,
+		pollMetadata: cmp.Or(meta, &pollMetadata{}),
+	})
+}
+
+func (s *MatcherDataSuite) pollImmediately(meta *pollMetadata) *matchResult {
+	return s.md.MatchPollerImmediately(&waitingPoller{
+		startTime:    s.now(),
+		pollMetadata: cmp.Or(meta, &pollMetadata{}),
+	})
+}
+
+func (s *MatcherDataSuite) queryFakeTime(duration time.Duration, respC chan<- taskResponse) {
+	ctx, cancel := clock.ContextWithTimeout(context.Background(), duration, s.ts)
+	defer cancel()
+	t := s.newQueryTask("1")
+	tres := s.md.EnqueueTaskAndWait([]context.Context{ctx}, t)
+	s.NoError(tres.ctxErr)
+
+	resp, ok := t.getResponse()
+	s.True(ok)
+	respC <- resp
+}
+
+func (s *MatcherDataSuite) newSyncTask(fwdInfo *taskqueuespb.TaskForwardInfo) *internalTask {
+	t := &persistencespb.TaskInfo{
+		CreateTime: timestamppb.New(s.now()),
+	}
+	return newInternalTaskForSyncMatch(t, fwdInfo, 0, nil)
+}
+
+func (s *MatcherDataSuite) newQueryTask(id string) *internalTask {
+	return newInternalQueryTask(id, &matchingservice.QueryWorkflowRequest{})
+}
+
+func (s *MatcherDataSuite) newBacklogTask(id int64, age time.Duration, f func(*internalTask, taskResponse)) *internalTask {
+	return s.newBacklogTaskWithPriority(id, age, f, nil)
+}
+
+func (s *MatcherDataSuite) newBacklogTaskWithPriority(id int64, age time.Duration, f func(*internalTask, taskResponse), pri *commonpb.Priority) *internalTask {
+	t := &persistencespb.AllocatedTaskInfo{
+		Data: &persistencespb.TaskInfo{
+			CreateTime: timestamppb.New(s.now().Add(-age)),
+			Priority:   pri,
+		},
+		TaskId: id,
+	}
+	return newInternalTaskFromBacklog(t, f)
+}
+
+func (s *MatcherDataSuite) waitForPollers(n int) {
+	s.Eventually(func() bool {
+		s.md.lock.Lock()
+		defer s.md.lock.Unlock()
+		return s.md.pollers.Len() >= n
+	}, time.Second, time.Millisecond)
+}
+
+func (s *MatcherDataSuite) waitForTasks(n int) {
+	s.Eventually(func() bool {
+		s.md.lock.Lock()
+		defer s.md.lock.Unlock()
+		return s.md.tasks.Len() >= n
+	}, time.Second, time.Millisecond)
+}
+
+func (s *MatcherDataSuite) TestMatchBacklogTask() {
+	poller := &waitingPoller{startTime: s.now()}
+
+	// no task yet, context should time out
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	pres := s.md.EnqueuePollerAndWait([]context.Context{ctx}, poller)
+	s.Require().ErrorIs(pres.ctxErr, context.DeadlineExceeded)
+	s.Equal(0, pres.ctxErrIdx)
+
+	// add a task
+	gotResponse := false
+	done := func(t *internalTask, tres taskResponse) {
+		gotResponse = true
+		s.NoError(tres.startErr)
+	}
+	t := s.newBacklogTask(123, 0, done)
+	s.md.EnqueueTaskNoWait(t)
+
+	// now should match with task
+	ctx, cancel = context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	pres = s.md.EnqueuePollerAndWait([]context.Context{ctx}, poller)
+	s.NoError(pres.ctxErr)
+	s.Equal(t, pres.task)
+
+	// finish task
+	pres.task.finish(taskFinishResult{consumedToken: true})
+	s.True(gotResponse)
+
+	// one more, context should time out again. note two contexts this time.
+	ctx, cancel = context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	pres = s.md.EnqueuePollerAndWait([]context.Context{context.Background(), ctx}, poller)
+	s.Require().ErrorIs(pres.ctxErr, context.DeadlineExceeded)
+	s.Equal(1, pres.ctxErrIdx, "deadline context was index 1")
+}
+
+func (s *MatcherDataSuite) TestMatchTaskImmediately() {
+	t := s.newSyncTask(nil)
+
+	// no match yet
+	s.Equal(syncMatchNoPoller, s.md.MatchTaskImmediately(t))
+
+	// poll in a goroutine
+	ch := make(chan *matchResult, 1)
+	go func() {
+		poller := &waitingPoller{startTime: s.now()}
+		ch <- s.md.EnqueuePollerAndWait(nil, poller)
+	}()
+
+	// wait until poller queued
+	s.waitForPollers(1)
+
+	// should match this time
+	s.Equal(syncMatchSuccess, s.md.MatchTaskImmediately(t))
+
+	// check match
+	pres := <-ch
+	s.NoError(pres.ctxErr)
+	s.Equal(t, pres.task)
+}
+
+func (s *MatcherDataSuite) TestMatchTaskImmediatelyRateLimited() {
+	// Set rate limit to zero — blocks all matches.
+	s.md.rateLimitManager.SetEffectiveRPSAndSourceForTesting(0, enumspb.RATE_LIMIT_SOURCE_API)
+	s.md.rateLimitManager.UpdateSimpleRateLimitWithBurstForTesting(0)
+
+	// Add a waiting poller.
+	go func() {
+		poller := &waitingPoller{startTime: s.now()}
+		s.md.EnqueuePollerAndWait(nil, poller)
+	}()
+	s.waitForPollers(1)
+
+	// Sync match should fail due to rate limiting, not lack of poller.
+	t := s.newSyncTask(nil)
+	s.Equal(syncMatchRateLimited, s.md.MatchTaskImmediately(t))
+}
+
+func (s *MatcherDataSuite) TestSyncMatchRateLimitedIncrementsStats() {
+	// Set a rate limit and consume a token so the limiter is blocking.
+	s.md.rateLimitManager.SetEffectiveRPSAndSourceForTesting(1.0, enumspb.RATE_LIMIT_SOURCE_API)
+	s.md.rateLimitManager.UpdateSimpleRateLimitWithBurstForTesting(0)
+	now := s.ts.Now().UnixNano()
+	s.md.rateLimitManager.mu.Lock()
+	s.md.rateLimitManager.wholeQueueReady = s.md.rateLimitManager.wholeQueueReady.consume(
+		s.md.rateLimitManager.wholeQueueLimit, now, 1)
+	s.md.rateLimitManager.mu.Unlock()
+
+	s.Equal(int32(0), s.rateLimitedCount.Load())
+
+	// Add a waiting poller.
+	go func() {
+		poller := &waitingPoller{startTime: s.now()}
+		s.md.EnqueuePollerAndWait(nil, poller)
+	}()
+	s.waitForPollers(1)
+
+	// Sync match should be rate limited and callback should fire.
+	t := s.newSyncTask(nil)
+	s.Equal(syncMatchRateLimited, s.md.MatchTaskImmediately(t))
+
+	s.Positive(s.rateLimitedCount.Load())
+}
+
+func (s *MatcherDataSuite) TestBacklogRateLimitedIncrementsStats() {
+	// Set a rate limit and consume a token so the limiter is blocking.
+	s.md.rateLimitManager.SetEffectiveRPSAndSourceForTesting(1.0, enumspb.RATE_LIMIT_SOURCE_API)
+	s.md.rateLimitManager.UpdateSimpleRateLimitWithBurstForTesting(0)
+	now := s.ts.Now().UnixNano()
+	s.md.rateLimitManager.mu.Lock()
+	s.md.rateLimitManager.wholeQueueReady = s.md.rateLimitManager.wholeQueueReady.consume(
+		s.md.rateLimitManager.wholeQueueLimit, now, 1)
+	s.md.rateLimitManager.mu.Unlock()
+
+	// Enqueue a backlog task.
+	_ = s.md.EnqueueTaskNoWait(s.newBacklogTask(123, 0, nil))
+
+	// Poller arrives — findAndWakeMatches should hit the rate limiter.
+	poller := &waitingPoller{startTime: s.now()}
+	s.md.MatchPollerImmediately(poller)
+
+	s.Positive(s.rateLimitedCount.Load())
+}
+
+func (s *MatcherDataSuite) TestMatchTaskImmediatelyDisabledBacklog() {
+	// register some backlog with old tasks
+	s.md.EnqueueTaskNoWait(s.newBacklogTask(123, 10*time.Minute, nil))
+
+	t := s.newSyncTask(nil)
+	s.Equal(syncMatchBacklogPresent, s.md.MatchTaskImmediately(t))
+}
+
+func (s *MatcherDataSuite) TestQuery() {
+	respC := make(chan taskResponse)
+	go s.queryFakeTime(time.Second, respC)
+
+	pres := s.pollFakeTime(time.Second)
+	s.NotNil(pres.task)
+	s.True(pres.task.isQuery())
+	// wake up getResponse. use some error just to check it's passed through.
+	someError := errors.New("some error")
+	pres.task.finish(taskFinishResult{err: someError, consumedToken: true})
+
+	resp := <-respC
+	s.False(resp.forwarded)
+	s.ErrorIs(resp.startErr, someError)
+}
+
+func (s *MatcherDataSuite) TestQueryForwardNil() {
+	respC := make(chan taskResponse)
+	go s.queryFakeTime(time.Second, respC)
+
+	pres := s.pollFakeTime(time.Second)
+	s.NotNil(pres.task)
+	s.True(pres.task.isQuery())
+	var fres *matchingservice.QueryWorkflowResponse
+	pres.task.finishForward(fres, nil, true)
+
+	resp := <-respC
+	s.True(resp.forwarded)
+	s.NoError(resp.forwardErr)
+	//nolint:testifylint // NotEqual is intentional: interface is non-nil but holds typed nil *QueryWorkflowResponse
+	s.NotEqual(resp.forwardRes, nil)
+	s.Nil(resp.forwardRes.(*matchingservice.QueryWorkflowResponse))
+}
+
+func (s *MatcherDataSuite) TestQueryForwardError() {
+	respC := make(chan taskResponse)
+	go s.queryFakeTime(time.Second, respC)
+
+	pres := s.pollFakeTime(time.Second)
+	s.NotNil(pres.task)
+	s.True(pres.task.isQuery())
+	var fres *matchingservice.QueryWorkflowResponse
+	someError := errors.New("some error")
+	pres.task.finishForward(fres, someError, true)
+
+	resp := <-respC
+	s.True(resp.forwarded)
+	s.ErrorIs(resp.forwardErr, someError)
+}
+
+func (s *MatcherDataSuite) TestQueryForwardResponse() {
+	respC := make(chan taskResponse)
+	go s.queryFakeTime(time.Second, respC)
+
+	pres := s.pollFakeTime(time.Second)
+	s.NotNil(pres.task)
+	s.True(pres.task.isQuery())
+	fres := &matchingservice.QueryWorkflowResponse{
+		QueryResult: payloads.EncodeString("ok"),
+	}
+	pres.task.finishForward(fres, nil, true)
+
+	resp := <-respC
+	s.True(resp.forwarded)
+	s.NoError(resp.forwardErr)
+	s.Contains(payloads.ToString(resp.forwardRes.(*matchingservice.QueryWorkflowResponse).QueryResult), "ok")
+}
+
+func (s *MatcherDataSuite) TestTaskForward() {
+	someError := errors.New("some error")
+	// one task forwarder
+	go func() {
+		poller := &waitingPoller{taskForwarderType: parentTaskForwarder}
+		pres := s.md.EnqueuePollerAndWait(nil, poller)
+		s.NotNil(pres.task)
+		// use some error just to check it's passed through
+		pres.task.finishForward(nil, someError, true)
+	}()
+	// two normal pollers
+	go s.pollFakeTime(time.Second)
+	go s.pollFakeTime(time.Second)
+
+	s.waitForPollers(3)
+
+	t1 := s.newSyncTask(nil)
+	t2 := s.newSyncTask(nil)
+	t3 := s.newSyncTask(nil)
+
+	// two tasks will get matched with normal pollers first
+	tres := s.md.EnqueueTaskAndWait(nil, t1)
+	s.NotNil(tres.poller)
+	s.Equal(notTaskForwarder, tres.poller.taskForwarderType)
+
+	tres = s.md.EnqueueTaskAndWait(nil, t2)
+	s.NotNil(tres.poller)
+	s.Equal(notTaskForwarder, tres.poller.taskForwarderType)
+
+	// third task will get matched with forwarder
+	tres = s.md.EnqueueTaskAndWait(nil, t3)
+	s.NotNil(tres.poller)
+	s.Equal(parentTaskForwarder, tres.poller.taskForwarderType)
+	fres, ok := t3.getResponse()
+	s.True(ok)
+	s.True(fres.forwarded)
+	s.ErrorIs(fres.forwardErr, someError)
+}
+
+func (s *MatcherDataSuite) TestRateLimitedBacklog() {
+	s.md.rateLimitManager.SetEffectiveRPSAndSourceForTesting(10.0, enumspb.RATE_LIMIT_SOURCE_API)
+	s.md.rateLimitManager.UpdateSimpleRateLimitWithBurstForTesting(300 * time.Millisecond)
+
+	// register some backlog with old tasks
+	for i := range 100 {
+		s.md.EnqueueTaskNoWait(s.newBacklogTask(123+int64(i), 0, nil))
+	}
+
+	start := s.ts.Now()
+
+	// start 10 poll loops to poll them
+	var running atomic.Int64
+	var lastTask atomic.Int64
+	for range 10 {
+		running.Add(1)
+		go func() {
+			defer running.Add(-1)
+			for {
+				if pres := s.pollFakeTime(time.Second); pres.ctxErr != nil {
+					return
+				}
+				lastTask.Store(s.now().UnixNano())
+			}
+		}()
+	}
+
+	// advance fake time until done
+	for running.Load() > 0 {
+		s.ts.Advance(time.Duration(rand.Int63n(int64(1 * time.Millisecond))))
+		gosched(3)
+	}
+
+	elapsed := time.Unix(0, lastTask.Load()).Sub(start)
+	s.Greater(elapsed, 9*time.Second)
+	// with very unlucky scheduling, we might end up taking longer to poll the tasks
+	s.Less(elapsed, 20*time.Second)
+}
+
+func (s *MatcherDataSuite) TestPerKeyRateLimit() {
+	s.md.rateLimitManager.SetFairnessKeyRateLimitDefaultForTesting(10.0, enumspb.RATE_LIMIT_SOURCE_API)
+	s.md.rateLimitManager.UpdatePerKeySimpleRateLimitWithBurstForTesting(300 * time.Millisecond)
+	// register some backlog with three keys
+	keys := []string{"key1", "key2", "key3"}
+	for i := range 300 {
+		t := s.newBacklogTaskWithPriority(123+int64(i), 0, nil, &commonpb.Priority{
+			FairnessKey: keys[i%3],
+		})
+		s.md.EnqueueTaskNoWait(t)
+	}
+
+	start := s.ts.Now()
+
+	// start 10 poll loops to poll them
+	var running atomic.Int64
+	var lastTask atomic.Int64
+	for range 10 {
+		running.Add(1)
+		go func() {
+			defer running.Add(-1)
+			for {
+				if pres := s.pollFakeTime(time.Second); pres.ctxErr != nil {
+					return
+				}
+				lastTask.Store(s.now().UnixNano())
+			}
+		}()
+	}
+
+	// advance fake time until done
+	for running.Load() > 0 {
+		s.ts.Advance(time.Duration(rand.Int63n(int64(1 * time.Millisecond))))
+		gosched(3)
+	}
+
+	elapsed := time.Unix(0, lastTask.Load()).Sub(start)
+	s.Greater(elapsed, 9*time.Second)
+	// with very unlucky scheduling, we might end up taking longer to poll the tasks
+	s.Less(elapsed, 20*time.Second)
+}
+
+// TestPerKeyRateLimitDoesNotBlockOtherKeys verifies that a rate-limited task for key1 does not
+// prevent a ready task for key2 from being dispatched, even when key2's task has lower priority.
+func (s *MatcherDataSuite) TestPerKeyRateLimitDoesNotBlockOtherKeys() {
+	// Set per-key limit low (1 RPS) so consuming one token puts key1 well into the future.
+	s.md.rateLimitManager.SetFairnessKeyRateLimitDefaultForTesting(1.0, enumspb.RATE_LIMIT_SOURCE_API)
+	s.md.rateLimitManager.UpdatePerKeySimpleRateLimitWithBurstForTesting(0)
+
+	key1 := &commonpb.Priority{PriorityKey: 1, FairnessKey: "key1"}
+	key2 := &commonpb.Priority{PriorityKey: 2, FairnessKey: "key2"}
+
+	// Consume one token for key1 so it is rate-limited.
+	task1a := s.newBacklogTaskWithPriority(1, 0, nil, key1)
+	s.Require().NoError(s.md.EnqueueTaskNoWait(task1a))
+	res := s.pollFakeTime(time.Second)
+	s.Equal(task1a, res.task)
+	res.task.finish(taskFinishResult{consumedToken: true})
+
+	// Now key1 is limited; add another key1 task (high priority) and a key2 task (lower priority).
+	task1b := s.newBacklogTaskWithPriority(2, 0, nil, key1)
+	task2 := s.newBacklogTaskWithPriority(3, 0, nil, key2)
+	s.Require().NoError(s.md.EnqueueTaskNoWait(task1b))
+	s.Require().NoError(s.md.EnqueueTaskNoWait(task2))
+
+	// key2 task should be dispatched even though key1 task has higher priority.
+	res = s.pollFakeTime(time.Second)
+	s.Equal(task2, res.task, "key2 task should dispatch; key1 is rate-limited")
+}
+
+// TestPerKeyRateLimitRecycleWakesBlockedMatch verifies that recycling a per-fairness-key
+// rate-limit token immediately wakes a match that was blocked on that key's rate limit.
+func (s *MatcherDataSuite) TestPerKeyRateLimitRecycleWakesBlockedMatch() {
+	// Set per-key limit low (1 RPS, no burst) so consuming one token for a key puts its
+	// next allowed dispatch a full second into the future.
+	s.md.rateLimitManager.SetFairnessKeyRateLimitDefaultForTesting(1.0, enumspb.RATE_LIMIT_SOURCE_API)
+	s.md.rateLimitManager.UpdatePerKeySimpleRateLimitWithBurstForTesting(0)
+
+	key1 := &commonpb.Priority{PriorityKey: 1, FairnessKey: "key1"}
+
+	// Dispatch one key1 task to consume the key's token. Don't finish it yet.
+	task1a := s.newBacklogTaskWithPriority(1, 0, nil, key1)
+	s.Require().NoError(s.md.EnqueueTaskNoWait(task1a))
+	res := s.pollFakeTime(time.Second)
+	s.Require().Equal(task1a, res.task)
+
+	// Enqueue a second key1 task. key1 is now rate-limited, so it cannot match yet.
+	task1b := s.newBacklogTaskWithPriority(2, 0, nil, key1)
+	s.Require().NoError(s.md.EnqueueTaskNoWait(task1b))
+
+	// Start a poller in the background. It finds task1b but is blocked by key1's rate
+	// limit (a rate-limit timer is set), so it parks without matching. Use no contexts
+	// so it blocks indefinitely.
+	ch := make(chan *matchResult, 1)
+	go func() {
+		poller := &waitingPoller{startTime: s.now()}
+		ch <- s.md.EnqueuePollerAndWait(nil, poller)
+	}()
+	s.waitForPollers(1)
+
+	// Finish task1a with consumedToken=false, which recycles the key1 token and should unblock task1b.
+	res.task.finish(taskFinishResult{consumedToken: false})
+
+	// The parked poller should now match task1b without any fake-time advancement.
+	select {
+	case pres := <-ch:
+		s.Require().NoError(pres.ctxErr)
+		s.Equal(task1b, pres.task, "recycled token should immediately dispatch the blocked key1 task")
+	case <-time.After(time.Second):
+		s.FailNow("recycling the per-key token did not wake the blocked match")
+	}
+}
+
+func (s *MatcherDataSuite) TestOrder() {
+	t1 := s.newBacklogTaskWithPriority(1, 0, nil, &commonpb.Priority{PriorityKey: 1})
+	t2 := s.newBacklogTaskWithPriority(2, 0, nil, &commonpb.Priority{PriorityKey: 2})
+	t3 := s.newBacklogTaskWithPriority(3, 0, nil, &commonpb.Priority{PriorityKey: 3})
+	tf := newPollForwarderTask(pollForwarderPriority, parentPollForwarder)
+
+	s.md.EnqueueTaskNoWait(t3)
+	s.md.EnqueueTaskNoWait(tf)
+	s.md.EnqueueTaskNoWait(t1)
+	s.md.EnqueueTaskNoWait(t2)
+
+	s.Equal(t1, s.pollFakeTime(time.Second).task)
+	s.Equal(t2, s.pollFakeTime(time.Second).task)
+	s.Equal(t3, s.pollFakeTime(time.Second).task)
+	// poll forwarder is last to match, but it does a half-match so we won't see it here
+}
+
+func (s *MatcherDataSuite) TestPollForwardSuccess() {
+	t1 := s.newBacklogTask(1, 0, nil)
+	t2 := s.newBacklogTask(2, 0, nil)
+
+	s.md.EnqueueTaskNoWait(t1)
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		tres := s.md.EnqueueTaskAndWait([]context.Context{ctx}, newPollForwarderTask(pollForwarderPriority, parentPollForwarder))
+		// task is woken up with poller to forward
+		s.NotNil(tres.poller)
+		// forward succeeded, pass back task
+		s.md.FinishMatchAfterPollForward(tres.poller, t2)
+	}()
+
+	s.waitForTasks(2)
+
+	s.Equal(t1, s.pollFakeTime(time.Second).task)
+	s.Equal(t2, s.pollFakeTime(time.Second).task)
+}
+
+func (s *MatcherDataSuite) TestPollForwardFailed() {
+	t1 := s.newBacklogTask(1, 0, nil)
+	t2 := s.newBacklogTask(2, 0, nil)
+
+	s.md.EnqueueTaskNoWait(t1)
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		tres := s.md.EnqueueTaskAndWait([]context.Context{ctx}, newPollForwarderTask(pollForwarderPriority, parentPollForwarder))
+		// task is woken up with poller to forward
+		s.NotNil(tres.poller)
+		// there's a new task in the meantime
+		s.md.EnqueueTaskNoWait(t2)
+		// forward failed, re-enqueue poller so it can match again
+		s.md.ReenqueuePollerIfNotMatched(tres.poller)
+	}()
+
+	s.waitForTasks(2)
+
+	s.Equal(t1, s.pollFakeTime(time.Second).task)
+	s.Equal(t2, s.pollFakeTime(time.Second).task)
+}
+
+func (s *MatcherDataSuite) TestPollForwardFailedTimedOut() {
+	t1 := s.newBacklogTask(1, 0, nil)
+	t2 := s.newBacklogTask(2, 0, nil)
+
+	s.md.EnqueueTaskNoWait(t1)
+
+	done := make(chan struct{})
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		tres := s.md.EnqueueTaskAndWait([]context.Context{ctx}, newPollForwarderTask(pollForwarderPriority, parentPollForwarder))
+		// task is woken up with poller to forward
+		s.NotNil(tres.poller)
+		// there's a new task in the meantime
+		s.md.EnqueueTaskNoWait(t2)
+		time.Sleep(100 * time.Millisecond) // nolint:forbidigo
+		// but we waited too long, poller timed out, so this does nothing (but doesn't crash or assert)
+		s.md.ReenqueuePollerIfNotMatched(tres.poller)
+		done <- struct{}{}
+	}()
+
+	s.waitForTasks(2)
+
+	s.Equal(t1, s.pollRealTime(10*time.Millisecond).task)
+	s.Error(s.pollRealTime(10 * time.Millisecond).ctxErr)
+
+	<-done
+}
+
+func (s *MatcherDataSuite) TestReprocessTasks() {
+	// add 100 tasks in reverse order
+	for i := range 100 {
+		s.md.EnqueueTaskNoWait(s.newBacklogTask(int64(101-i), 0, nil))
+	}
+
+	// remove 1/4 of them
+	removed := s.md.ReprocessTasks(func(t *internalTask) bool {
+		return t.event.TaskId%4 == 0
+	})
+
+	s.Len(removed, 25)
+	for _, t := range removed {
+		s.Equal(int64(0), t.event.TaskId%4)
+		s.NotNil(t.matchResult)
+		s.Equal(errReprocessTask, t.matchResult.ctxErr)
+	}
+
+	// pull out remaining ones, should be in order
+	prev := int64(0)
+	for range 75 {
+		t := s.pollRealTime(time.Microsecond).task
+		s.NotNil(t)
+		s.NotEqual(int64(0), t.event.TaskId%4)
+		s.Greater(t.event.TaskId, prev)
+		prev = t.event.TaskId
+	}
+
+	// no more
+	res := s.pollRealTime(time.Microsecond)
+	s.Nil(res.task)
+	s.Error(res.ctxErr)
+}
+
+func (s *MatcherDataSuite) TestMinPriorityFiltering() {
+	// Add tasks at different priorities
+	t1 := s.newBacklogTaskWithPriority(1, 0, nil, &commonpb.Priority{PriorityKey: 1})
+	t2 := s.newBacklogTaskWithPriority(2, 0, nil, &commonpb.Priority{PriorityKey: 3})
+	t3 := s.newBacklogTaskWithPriority(3, 0, nil, &commonpb.Priority{PriorityKey: 5})
+
+	s.md.EnqueueTaskNoWait(t3)
+	s.md.EnqueueTaskNoWait(t2)
+	s.md.EnqueueTaskNoWait(t1)
+
+	// Poll with minPriority=2 should only get tasks with priority <= 2
+	// (i.e., tasks at priority 1 and 2, but not 3 or 5)
+	res := s.pollWithMinPriority(20*time.Millisecond, 2)
+	s.Require().NoError(res.ctxErr)
+	s.Equal(t1, res.task) // priority 1 task
+
+	// Next poll with minPriority=2 should timeout since t2 (pri 3) and t3 (pri 5) don't match
+	res = s.pollWithMinPriority(20*time.Millisecond, 2)
+	s.Require().Error(res.ctxErr)
+
+	// Poll with minPriority=3 should get t2 (pri 3)
+	res = s.pollWithMinPriority(20*time.Millisecond, 3)
+	s.Require().NoError(res.ctxErr)
+	s.Equal(t2, res.task)
+
+	// Poll with minPriority=5 should get t3 (pri 5)
+	res = s.pollWithMinPriority(20*time.Millisecond, 5)
+	s.Require().NoError(res.ctxErr)
+	s.Equal(t3, res.task)
+
+	// No more tasks
+	res = s.pollWithMinPriority(20*time.Millisecond, 5)
+	s.Require().Error(res.ctxErr)
+}
+
+func (s *MatcherDataSuite) TestMinPriorityZeroMatchesAll() {
+	// minPriority=0 means no filter
+	t1 := s.newBacklogTaskWithPriority(1, 0, nil, &commonpb.Priority{PriorityKey: 1})
+	t2 := s.newBacklogTaskWithPriority(2, 0, nil, &commonpb.Priority{PriorityKey: 5})
+
+	s.md.EnqueueTaskNoWait(t2)
+	s.md.EnqueueTaskNoWait(t1)
+
+	// Poll with minPriority=0 should match first task
+	res := s.pollWithMinPriority(20*time.Millisecond, 0)
+	s.Require().NoError(res.ctxErr)
+	s.Equal(t1, res.task)
+
+	res = s.pollWithMinPriority(20*time.Millisecond, 0)
+	s.Require().NoError(res.ctxErr)
+	s.Equal(t2, res.task)
+}
+
+func (s *MatcherDataSuite) TestMatchPollerImmediately() {
+	// Add tasks at different priorities
+	t1 := s.newBacklogTaskWithPriority(1, 0, nil, &commonpb.Priority{PriorityKey: 1})
+	t2 := s.newBacklogTaskWithPriority(2, 0, nil, &commonpb.Priority{PriorityKey: 5})
+
+	s.md.EnqueueTaskNoWait(t2)
+	s.md.EnqueueTaskNoWait(t1)
+
+	// MatchPollerImmediately with minPriority=2 should only match t1 (pri 1)
+	res := s.pollImmediately(&pollMetadata{
+		conditions: &matchingservice.PollConditions{
+			MinPriority: 2,
+		},
+	})
+	s.NotNil(res)
+	s.Equal(t1, res.task)
+
+	// t2 has priority 5, so with minPriority=2 it shouldn't match
+	res = s.pollImmediately(&pollMetadata{
+		conditions: &matchingservice.PollConditions{
+			MinPriority: 2,
+		},
+	})
+	s.Nil(res)
+
+	// But with minPriority=5 it should match
+	res = s.pollImmediately(&pollMetadata{
+		conditions: &matchingservice.PollConditions{
+			MinPriority: 5,
+		},
+	})
+	s.NotNil(res)
+	s.Equal(t2, res.task)
+}
+
+func (s *MatcherDataSuite) TestFindMatch() {
+	// Table-driven test for findMatch logic. Each case sets up one task and one poller
+	// and verifies whether they match.
+	cases := []struct {
+		name            string
+		allowForwarding bool
+		// task properties
+		taskIsQuery           bool
+		taskPollForwarderType pollForwarderType
+		taskSync              bool // true means task has forwardCtx (sync match task)
+		taskPriority          int32
+		// poller properties
+		pollerQueryOnly         bool
+		pollerForwardCtx        bool // true means poller can be forwarded
+		pollerTaskForwarderType taskForwarderType
+		pollerMinPriority       int32
+		// expected
+		shouldMatch bool
+	}{
+		// basic
+		{
+			name:            "backlog task w/normal poller",
+			allowForwarding: true,
+			shouldMatch:     true,
+		},
+		{
+			name:            "sync task w/normal poller",
+			allowForwarding: true,
+			taskSync:        true,
+			shouldMatch:     true,
+		},
+		// queryOnly poller conditions
+		{
+			name:            "queryOnly poller with non-query task - no match",
+			allowForwarding: true,
+			pollerQueryOnly: true,
+			shouldMatch:     false,
+		},
+		{
+			name:            "queryOnly poller with query task - match",
+			allowForwarding: true,
+			taskIsQuery:     true,
+			pollerQueryOnly: true,
+			shouldMatch:     true,
+		},
+		{
+			name:                  "queryOnly poller with pollForwarder task - match",
+			allowForwarding:       true,
+			taskPollForwarderType: parentPollForwarder,
+			pollerQueryOnly:       true,
+			pollerForwardCtx:      true, // poll forwarder needs forwardCtx
+			shouldMatch:           true,
+		},
+		// pollForwarder task conditions
+		{
+			name:                  "pollForwarder task with poller without forwardCtx - no match",
+			allowForwarding:       true,
+			taskPollForwarderType: parentPollForwarder,
+			pollerForwardCtx:      false,
+			shouldMatch:           false,
+		},
+		{
+			name:                  "pollForwarder task with poller with forwardCtx - match",
+			allowForwarding:       true,
+			taskPollForwarderType: parentPollForwarder,
+			pollerForwardCtx:      true,
+			shouldMatch:           true,
+		},
+		// parentTaskForwarder poller conditions
+		{
+			name:                    "parentTaskForwarder with backlog and !allowForwarding - no match",
+			allowForwarding:         false,
+			taskSync:                false,
+			pollerTaskForwarderType: parentTaskForwarder,
+			shouldMatch:             false,
+		},
+		{
+			name:                    "parentTaskForwarder with sync and !allowForwarding - no match",
+			allowForwarding:         false,
+			taskSync:                true,
+			pollerTaskForwarderType: parentTaskForwarder,
+			shouldMatch:             false,
+		},
+		{
+			name:                    "parentTaskForwarder with allowForwarding - match",
+			allowForwarding:         true,
+			pollerTaskForwarderType: parentTaskForwarder,
+			shouldMatch:             true,
+		},
+		// validatorTaskForwarder conditions
+		{
+			name:                    "validatorTaskForwarder with non-backlog task - no match",
+			allowForwarding:         true,
+			taskSync:                true,
+			pollerTaskForwarderType: validatorTaskForwarder,
+			shouldMatch:             false,
+		},
+		{
+			name:                    "validatorTaskForwarder with backlog task - match",
+			allowForwarding:         true,
+			taskSync:                false,
+			pollerTaskForwarderType: validatorTaskForwarder,
+			shouldMatch:             true,
+		},
+		{
+			name:                    "validatorTaskForwarder with backlog task even with !allowForwarding - match",
+			allowForwarding:         false,
+			taskSync:                false,
+			pollerTaskForwarderType: validatorTaskForwarder,
+			shouldMatch:             true,
+		},
+		// minPriority filtering
+		{
+			name:              "minPriority excludes higher priority number - no match",
+			allowForwarding:   true,
+			taskPriority:      5,
+			pollerMinPriority: 2, // only accepts priority <= 2
+			shouldMatch:       false,
+		},
+		{
+			name:              "minPriority includes matching priority - match",
+			allowForwarding:   true,
+			taskPriority:      2,
+			pollerMinPriority: 2,
+			shouldMatch:       true,
+		},
+		{
+			name:              "minPriority includes lower priority number - match",
+			allowForwarding:   true,
+			taskPriority:      1,
+			pollerMinPriority: 5,
+			shouldMatch:       true,
+		},
+		{
+			name:              "minPriority=0 matches any priority - match",
+			allowForwarding:   true,
+			taskPriority:      5,
+			pollerMinPriority: 0,
+			shouldMatch:       true,
+		},
+		// priorityBacklogPollForwarder works with !allowForwarding
+		{
+			name:                  "normalPollForwarder skipped when !allowForwarding",
+			allowForwarding:       false,
+			taskPollForwarderType: parentPollForwarder,
+			pollerForwardCtx:      true,
+			shouldMatch:           false,
+		},
+		{
+			name:                  "priorityBacklogPollForwarder allowed when !allowForwarding",
+			allowForwarding:       false,
+			taskPollForwarderType: priorityBacklogPollForwarder,
+			pollerForwardCtx:      true,
+			shouldMatch:           true,
+		},
+		// forwarders never match (because pollerForwardCtx is nil; these are redundant with
+		// the current logic but may be independent in the future)
+		{
+			name:                    "normal forwarder with normal forwarder",
+			allowForwarding:         true,
+			taskPollForwarderType:   parentPollForwarder,
+			pollerTaskForwarderType: parentTaskForwarder,
+			shouldMatch:             false,
+		},
+		{
+			name:                    "priority poll forwarder with normal task forwarder",
+			allowForwarding:         true,
+			taskPollForwarderType:   priorityBacklogPollForwarder,
+			pollerTaskForwarderType: parentTaskForwarder,
+			shouldMatch:             false,
+		},
+		{
+			name:                    "normal poll forwarder with validator task forwarder",
+			allowForwarding:         true,
+			taskPollForwarderType:   parentPollForwarder,
+			pollerTaskForwarderType: validatorTaskForwarder,
+			shouldMatch:             false,
+		},
+	}
+
+	for _, tc := range cases {
+		s.Run(tc.name, func() {
+			// Reset the task tree for each subtest, since Add appends rather than
+			// replacing (the old s.md.tasks.heap assignment reset implicitly).
+			s.md.tasks = newTaskBTree()
+
+			// Create task
+			var task *internalTask
+			if tc.taskIsQuery {
+				task = newInternalQueryTask("test", &matchingservice.QueryWorkflowRequest{})
+			} else if tc.taskPollForwarderType != notPollForwarder {
+				task = newPollForwarderTask(pollForwarderPriority, tc.taskPollForwarderType)
+			} else if tc.taskSync {
+				task = newInternalTaskForSyncMatch(&persistencespb.TaskInfo{}, nil, 0, nil)
+				// sync always has forwardCtx, backlog does not
+				task.forwardCtx = context.Background()
+			} else {
+				task = s.newBacklogTask(1, 0, nil)
+			}
+			if tc.taskPriority > 0 {
+				task.effectivePriority = effectivePriorityFactor * priorityKey(tc.taskPriority)
+			}
+			s.md.tasks.Add(task)
+
+			// Create poller
+			poller := &waitingPoller{
+				startTime:         s.now(),
+				queryOnly:         tc.pollerQueryOnly,
+				taskForwarderType: tc.pollerTaskForwarderType,
+				pollMetadata:      &pollMetadata{},
+			}
+			if tc.pollerForwardCtx {
+				poller.forwardCtx = context.Background()
+			}
+			if tc.pollerMinPriority > 0 {
+				poller.pollMetadata.conditions = &matchingservice.PollConditions{
+					MinPriority: tc.pollerMinPriority,
+				}
+			}
+			s.md.pollers.heap = []*waitingPoller{poller}
+
+			// Call findMatch
+			s.md.lock.Lock()
+			now := s.ts.Now().UnixNano()
+			foundTask, foundPoller, _ := s.md.findMatch(tc.allowForwarding, now)
+			s.md.lock.Unlock()
+
+			if tc.shouldMatch {
+				s.NotNil(foundTask, "expected task to be returned")
+				s.NotNil(foundPoller, "expected poller to be returned")
+			} else {
+				s.Nil(foundTask, "expected no task match")
+				s.Nil(foundPoller, "expected no poller match")
+			}
+		})
+	}
+}
+
+// simple limiter tests
+
+func TestSimpleLimiter(t *testing.T) {
+	p := makeSimpleLimiterParams(10, time.Second)
+
+	base := time.Now().UnixNano()
+	now := base
+	var ready simpleLimiter
+
+	// can consume 11 tokens immediately (1 since we're starting from 0 and 10 burst)
+	for range 11 {
+		require.GreaterOrEqual(t, now, ready)
+		ready = ready.consume(p, now, 1)
+	}
+	// now not ready anymore
+	require.Less(t, now, ready)
+
+	// after 100 ms, we can consume one more
+	now += int64(99 * time.Millisecond)
+	require.Less(t, now, ready)
+	now += int64(1 * time.Millisecond)
+	require.GreaterOrEqual(t, now, ready)
+	ready = ready.consume(p, now, 1)
+	require.Less(t, now, ready)
+}
+
+func TestSimpleLimiterOverTime(t *testing.T) {
+	p := makeSimpleLimiterParams(10, time.Second)
+
+	base := time.Now().UnixNano()
+	now := base
+	var ready simpleLimiter
+
+	consumed := int64(0)
+	for range 10000 {
+		// sleep for some random time, average < 100ms, so we are limited on average
+		// but have some gaps too.
+		now += (70 + rand.Int63n(50)) * int64(time.Millisecond)
+
+		if now >= int64(ready) {
+			ready = ready.consume(p, now, 1)
+			consumed++
+		}
+	}
+
+	effectiveRate := float64(consumed) / float64(now-base) * float64(time.Second)
+	require.InEpsilon(t, 10, effectiveRate, 0.01)
+}
+
+func TestSimpleLimiterRecycle(t *testing.T) {
+	p := makeSimpleLimiterParams(10, time.Second)
+
+	base := time.Now().UnixNano()
+	now := base
+	var ready simpleLimiter
+
+	consumed := int64(0)
+	for range 10000 {
+		// sleep for some random time, always < 100ms, so we are always limited
+		now += (30 + rand.Int63n(30)) * int64(time.Millisecond)
+
+		if now >= int64(ready) {
+			ready = ready.consume(p, now, 1)
+			consumed++
+
+			// 20% of the time, recycle the token we took
+			if rand.Intn(100) < 20 {
+				now += int64(5 * time.Millisecond)
+				ready = ready.consume(p, now, -1)
+				consumed--
+			}
+		}
+	}
+
+	effectiveRate := float64(consumed) / float64(now-base) * float64(time.Second)
+	require.InEpsilon(t, 10, effectiveRate, 0.01)
+}
+
+func TestSimpleLimiterUnlimited(t *testing.T) {
+	now := time.Now().UnixNano()
+	var ready simpleLimiter
+
+	pInf := makeSimpleLimiterParams(1e12, 0)
+	require.False(t, pInf.never())
+	require.False(t, pInf.limited())
+
+	for range 1000 {
+		ready = ready.consume(pInf, now, 1)
+		require.LessOrEqual(t, ready.delay(now), time.Duration(0))
+	}
+}
+
+func TestSimpleLimiterLowToHigh(t *testing.T) {
+	for _, lowRate := range []float64{
+		0,
+		1e-8, // 1 per 1000+ days
+	} {
+		pLow := makeSimpleLimiterParams(lowRate, time.Second)
+		require.Equal(t, pLow.never(), (lowRate == 0))
+
+		now := time.Now().UnixNano()
+		var ready simpleLimiter
+		ready = ready.consume(pLow, now, 1)
+		// not ready yet
+		require.Greater(t, ready.delay(now), time.Duration(0))
+		// not ready even after 1 day
+		require.Greater(t, ready.delay(now+(24*time.Hour).Nanoseconds()), time.Duration(0))
+
+		// try clipping using the low limit
+		ready = ready.clip(pLow, now, 1)
+		// still not ready now or in 1 day
+		require.Greater(t, ready.delay(now), time.Duration(0))
+		require.Greater(t, ready.delay(now+(24*time.Hour).Nanoseconds()), time.Duration(0))
+
+		// switch to higher rate limit
+		pHigh := makeSimpleLimiterParams(10, time.Second)
+		require.False(t, pHigh.never())
+		require.True(t, pHigh.limited())
+
+		// clip to high limit
+		ready = ready.clip(pHigh, now, 1)
+		// not ready yet
+		require.Greater(t, ready.delay(now), time.Duration(0))
+		// ready within one minute
+		require.Less(t, ready.delay(now+time.Minute.Nanoseconds()), time.Duration(0))
+	}
+}
+
+func TestCheckConstants(t *testing.T) {
+	// 1000 to leave room for further adjustments
+	assert.Greater(t, pollForwarderPriority, 1000*maxPriorityLevels)
+}
+
+func FuzzMatcherData(f *testing.F) {
+	f.Fuzz(func(t *testing.T, tape []byte) {
+		cfg := newTaskQueueConfig(
+			tqid.UnsafeTaskQueueFamily("nsid", "tq").TaskQueue(enumspb.TASK_QUEUE_TYPE_ACTIVITY),
+			NewConfig(dynamicconfig.NewNoopCollection()),
+			"nsname",
+		)
+		ts := clock.NewEventTimeSource()
+		ts.UseAsyncTimers(true)
+		logger := log.NewNoopLogger()
+		rateLimitManager := newRateLimitManager(&mockUserDataManager{}, cfg, enumspb.TASK_QUEUE_TYPE_ACTIVITY)
+		rateLimitManager.Start()
+		md := newMatcherData(cfg, logger, ts, true, rateLimitManager, func() {})
+
+		next := func() int {
+			if len(tape) == 0 {
+				return -1
+			}
+			v := tape[0]
+			tape = tape[1:]
+			return int(v)
+		}
+		randms := func(n int) time.Duration { return time.Duration(next()%n+1) * time.Millisecond }
+		randage := func(n int) time.Duration { return -time.Duration(next()%n) * time.Second }
+
+		tid := int64(0)
+		var pollForwarders, taskForwarders atomic.Int64
+		const ops = 20
+
+	loop:
+		for {
+			switch (next() + 1) % ops {
+			case 0:
+				break loop
+
+			case 1: // add backlog task
+				tid++
+				ati := &persistencespb.AllocatedTaskInfo{
+					Data: &persistencespb.TaskInfo{
+						CreateTime: timestamppb.New(ts.Now().Add(randage(10))),
+					},
+					TaskId: tid,
+				}
+				_ = md.EnqueueTaskNoWait(newInternalTaskFromBacklog(ati, nil))
+
+			case 2: // add backlog task with priority
+				tid++
+				ati := &persistencespb.AllocatedTaskInfo{
+					Data: &persistencespb.TaskInfo{
+						CreateTime: timestamppb.New(ts.Now().Add(randage(10))),
+						Priority: &commonpb.Priority{
+							PriorityKey: int32(1 + next()%5),
+						},
+					},
+					TaskId: tid,
+				}
+				_ = md.EnqueueTaskNoWait(newInternalTaskFromBacklog(ati, nil))
+
+			case 3: // add poller
+				timeout := randms(100)
+				queryOnly := next()%8 == 0
+				go func() {
+					ctx, cancel := clock.ContextWithTimeout(context.Background(), timeout, ts)
+					defer cancel()
+					md.EnqueuePollerAndWait([]context.Context{ctx}, &waitingPoller{
+						startTime:    ts.Now(),
+						forwardCtx:   ctx, // TODO: not always forwardable?
+						pollMetadata: &pollMetadata{},
+						queryOnly:    queryOnly,
+					})
+				}()
+
+			case 4: // add query task
+				timeout := randms(100)
+				go func() {
+					ctx, cancel := clock.ContextWithTimeout(context.Background(), timeout, ts)
+					defer cancel()
+					t := newInternalQueryTask("123", nil)
+					t.forwardCtx = ctx
+					md.EnqueueTaskAndWait([]context.Context{ctx}, t)
+				}()
+
+			case 5: // add poll forwarder
+				if pollForwarders.Load() >= 2 {
+					continue
+				}
+				pollForwarders.Add(1)
+				sleepTime := randms(100)
+				go func() {
+					defer pollForwarders.Add(-1)
+					res := md.EnqueueTaskAndWait(nil, newPollForwarderTask(pollForwarderPriority, parentPollForwarder))
+					softassert.That(md.logger, res.ctxErr == nil && res.poller != nil, "")
+					ts.Sleep(sleepTime)
+					t := &persistencespb.TaskInfo{
+						CreateTime: timestamppb.New(ts.Now()),
+					}
+					md.FinishMatchAfterPollForward(res.poller, newInternalTaskForSyncMatch(t, nil, 0, nil))
+				}()
+
+			case 6: // add task forwarder
+				if taskForwarders.Load() >= 2 {
+					continue
+				}
+				taskForwarders.Add(1)
+				sleepTime := randms(100)
+				go func() {
+					defer taskForwarders.Add(-1)
+					res := md.EnqueuePollerAndWait(nil, &waitingPoller{taskForwarderType: parentTaskForwarder})
+					softassert.That(md.logger, res.ctxErr == nil && res.task != nil, "")
+					ts.Sleep(sleepTime)
+					res.task.finishForward(nil, nil, true)
+				}()
+
+			case ops - 1: // jump ahead, just to speed things up
+				ts.AdvanceNext()
+				gosched(3)
+
+			default:
+				ts.Advance(time.Millisecond)
+				gosched(3)
+			}
+		}
+
+		for ts.NumTimers() > 0 {
+			ts.AdvanceNext()
+			gosched(3)
+		}
+	})
+}
+
+func gosched(n int) {
+	for range n {
+		runtime.Gosched()
+	}
+}
